@@ -1,0 +1,6 @@
+{
+  "name": "CoachPlan",
+  "description": "Build better sessions. Faster. Structured football training session planner for community coaches.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
