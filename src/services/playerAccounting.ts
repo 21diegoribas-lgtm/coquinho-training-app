@@ -141,7 +141,7 @@ export function formatFromOrganization(
   if (!org || org.groups <= 0 || org.playersPerGroup <= 0) {
     return `${players} Cầu thủ`;
   }
-  const leftover = org.leftover ?? 0;
+  const leftover = org.leftover ?? org.restingPlayers ?? 0;
   const role = org.leftoverRole ?? (leftover > 0 ? 'joker' : 'none');
   const label = leftoverLabel({
     groups: org.groups,
@@ -151,4 +151,49 @@ export function formatFromOrganization(
     accounted: org.groups * org.playersPerGroup + leftover,
   });
   return `${players} Cầu thủ (${org.groups} nhóm ${org.playersPerGroup}${label})`;
+}
+
+/** Validate the allocation itself, rather than trusting a session-level total. */
+export function validPlayerOrganization(value: unknown, players: number): value is ExercisePlayerOrganization {
+  if (!value || typeof value !== 'object') return false;
+  const org = value as ExercisePlayerOrganization;
+  const extra = org.leftover ?? org.restingPlayers ?? 0;
+  return Number.isInteger(org.groups) && org.groups > 0 &&
+    Number.isInteger(org.playersPerGroup) && org.playersPerGroup > 0 &&
+    Number.isInteger(extra) && extra >= 0 &&
+    (org.restingPlayers === undefined || (Number.isInteger(org.restingPlayers) && org.restingPlayers >= 0 &&
+      (org.leftover === undefined || org.restingPlayers === 0 || org.restingPlayers === org.leftover))) &&
+    (extra === 0 ? org.leftoverRole === undefined || org.leftoverRole === 'none' :
+      org.leftoverRole === 'joker' || org.leftoverRole === 'rotation' ||
+      (org.leftover === undefined && org.restingPlayers === extra)) &&
+    org.groups * org.playersPerGroup + extra === players;
+}
+
+/** Detect explicit equal-group/parallel-field claims that contradict structured data.
+ * This deliberately does not attempt to interpret arbitrary natural language.
+ */
+export function organizationMatchesStructure(text: string, org: ExercisePlayerOrganization): boolean {
+  const groups = /\b(\d+)\s*(?:groups?\s*(?:of\s*)?|nhóm\s*)(\d+)\b/gi;
+  const fields = /\b(\d+)\s*(?:(?:parallel\s+)?(?:fields?\s*(?:of\s*)?)?|[x×]\s*)(\d+)\s*v\s*(\d+)(?:\s*(?:fields?|sân))?/gi;
+  for (const match of text.matchAll(groups)) {
+    // The warm-up allocation can contain pairs plus one rotating trio.
+    if (+match[1] === 1 && +match[2] === 3 &&
+      (org.leftover ?? org.restingPlayers) === 3 && org.leftoverRole === 'rotation' &&
+      /^\s*xoay tua/.test(text.slice(match.index! + match[0].length))) continue;
+    if (+match[1] !== org.groups || +match[2] !== org.playersPerGroup) return false;
+  }
+  for (const match of text.matchAll(fields)) {
+    if (+match[1] !== org.groups || +match[2] + +match[3] !== org.playersPerGroup) return false;
+  }
+  const extras = /\+\s*(\d+)\s*(?:(?:rotating|resting)\s+)?(?:jokers?|neutrals?|servers?|rotating players?|resting players?|cầu thủ xoay tua)\b/gi;
+  for (const match of text.matchAll(extras)) {
+    if (+match[1] !== (org.leftover ?? org.restingPlayers ?? 0)) return false;
+  }
+  return true;
+}
+
+export function explicitOrganization(text: string, players: number, org: ExercisePlayerOrganization): string {
+  const allocation = formatFromOrganization(players, org);
+  if (text.includes(allocation)) return text;
+  return `${allocation}. ${text}`;
 }

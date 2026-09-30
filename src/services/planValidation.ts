@@ -1,4 +1,4 @@
-import { toPlayerOrganization } from './playerAccounting';
+import { explicitOrganization, organizationMatchesStructure, validPlayerOrganization } from './playerAccounting';
 import { GeminiTrainingPlan, TrainingPhase } from '../types/trainingPlan';
 import { Exercise, GameFormat, SessionDuration, TrainingSession } from '../types/session';
 import { isSessionDuration, normalizeDurationsToTotal } from './durationUtils';
@@ -75,6 +75,12 @@ export function validateGeminiPlan(plan: unknown): PlanValidationResult {
       }
       if (!asNonEmptyString(ph.exerciseName, '')) errors.push(`phase[${idx}].exerciseName`);
       if (!asNonEmptyString(ph.organization, '')) errors.push(`phase[${idx}].organization`);
+      if (!Number.isInteger(ph.players) || Number(ph.players) < 4 || Number(ph.players) > 50) errors.push(`phase[${idx}].players`);
+      if (!validPlayerOrganization(ph.playerOrganization, Number(ph.players))) {
+        errors.push(`phase[${idx}].playerOrganization total/roles`);
+      } else if (!organizationMatchesStructure(String(ph.organization || ''), ph.playerOrganization)) {
+        errors.push(`phase[${idx}].organization contradicts playerOrganization`);
+      }
       if (!asNonEmptyString(ph.execution, '')) errors.push(`phase[${idx}].execution`);
       const points = ph.coachingPoints;
       if (!Array.isArray(points) || points.length === 0 || points.some(v => typeof v !== 'string' || !v.trim())) {
@@ -94,6 +100,7 @@ export function sanitizeGeminiPlan(
   const raw = plan as Record<string, unknown>;
   const phasesRaw = Array.isArray(raw.phases) ? raw.phases : [];
   if (!validateGeminiPlan(plan).ok) return null;
+  if (phasesRaw.some(ph => ph.players !== fallbacks.players)) return null;
 
   const usedIds = new Set<string>();
   const phases: TrainingPhase[] = phasesRaw.map((phase, idx) => {
@@ -106,7 +113,7 @@ export function sanitizeGeminiPlan(
       players: fallbacks.players,
       area: asNonEmptyString(ph.area, '25 × 20 m'),
       equipment: asStringArray(ph.equipment, ['Bóng', 'Cọc tiêu', 'Áo bib']),
-      organization: asNonEmptyString(ph.organization, 'Bố trí sân bãi và chia nhóm cầu thủ đồng đều.'),
+      organization: explicitOrganization(String(ph.organization), fallbacks.players, normalizeOrganization(ph.playerOrganization, fallbacks.players)),
       execution: asNonEmptyString(ph.execution, 'Cầu thủ thực hiện các bài tập chuyền và di chuyển.'),
       coachingPoints: asStringArray(ph.coachingPoints, [
         'Quan sát trước khi nhận bóng.',
@@ -196,6 +203,9 @@ export function sanitizeTrainingSession(session: unknown): TrainingSession | nul
   const totalDuration = blocks.reduce((sum, b) => sum + b.duration, 0);
 
   if (!title || !Number.isInteger(playerCount) || playerCount < 4 || playerCount > 50 || !Number.isFinite(raw.totalDuration) || Number(raw.totalDuration) <= 0 || !totalDuration) return null;
+  if (blocks.some(b => b.playerOrganization &&
+    (!validPlayerOrganization(b.playerOrganization, playerCount) ||
+      !organizationMatchesStructure(b.organization, b.playerOrganization)))) return null;
   if (blocks.some((b) => !b.exerciseName || !b.organization || !b.howItWorks.length || !b.coachingPoints.length)) {
     return null;
   }
@@ -227,11 +237,10 @@ export function isUsableTrainingSession(session: TrainingSession | null): sessio
 }
 
 function normalizeOrganization(value: any, total: number) {
-  if (value && Number.isInteger(value.groups) && value.groups > 0 && Number.isInteger(value.playersPerGroup) && value.playersPerGroup > 0 && value.groups * value.playersPerGroup <= total) {
-    const leftover = total - value.groups * value.playersPerGroup;
-    return { groups: value.groups, playersPerGroup: value.playersPerGroup, leftover, leftoverRole: leftover ? 'rotation' as const : 'none' as const };
-  }
-  return toPlayerOrganization(total, 'technical');
+  if (!validPlayerOrganization(value, total)) throw new Error('Invalid player organization');
+  const leftover = value.leftover ?? value.restingPlayers ?? 0;
+  return { groups: value.groups, playersPerGroup: value.playersPerGroup, leftover,
+    leftoverRole: value.leftoverRole ?? (leftover ? 'rotation' as const : 'none' as const) };
 }
 
 // Discard malformed optional diagrams on load; rendering/generation remains unchanged.

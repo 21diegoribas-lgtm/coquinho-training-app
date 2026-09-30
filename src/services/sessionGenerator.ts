@@ -1,6 +1,21 @@
 import { Exercise, GameFormat, SessionDuration, TrainingSession, PitchDiagramData } from '../types/session';
-import { formatPlayerDistribution, toPlayerOrganization } from './playerAccounting';
+import { explicitOrganization, formatPlayerDistribution, toPlayerOrganization } from './playerAccounting';
 import { buildDrillDiagram } from './drillDiagramService';
+import { formatPhaseContent } from './gameFormatContext';
+
+function withFormatContext(exercise: Exercise, topic: string, gameFormat: GameFormat, players: number): Exercise {
+  const { spatialSetup, execution, ...content } = formatPhaseContent(gameFormat, exercise.blockType, topic, {
+    ...exercise, execution: exercise.howItWorks.join('\n'),
+  });
+  return {
+    ...exercise,
+    ...content,
+    // Keep the variation selected by the local generator.
+    exerciseName: exercise.exerciseName,
+    organization: `${formatPlayerDistribution(players, exercise.blockType)}. ${spatialSetup}`,
+    howItWorks: execution.split('\n'),
+  };
+}
 
 interface DurationSplit {
   warm_up: number;
@@ -987,6 +1002,7 @@ export function generateTrainingSession(
 
     const diagramBlocks = blocks.map((exercise) => ({
       ...exercise,
+      organization: explicitOrganization(exercise.organization, playerCount, exercise.playerOrganization!),
       pitchDiagram: buildDrillDiagram({
         blockType: exercise.blockType,
         exerciseName: exercise.exerciseName,
@@ -1013,7 +1029,7 @@ export function generateTrainingSession(
         month: '2-digit',
         year: 'numeric',
       }),
-      blocks: diagramBlocks,
+      blocks: diagramBlocks.map(exercise => withFormatContext(exercise, cleanTopic, gameFormat, playerCount)),
     };
   }
 
@@ -1057,7 +1073,7 @@ export function generateTrainingSession(
       playerOrganization: toPlayerOrganization(playerCount, 'technical'),
       areaSize: '30 × 25 m trạm tam giác',
       equipment: ['10 Nón', '10 Quả bóng', '4 Cọc tiêu kỹ thuật'],
-      organization: `Thiết lập 2 trạm kỹ thuật song song để toàn bộ ${playerCount} cầu thủ đều được chạm bóng tối đa, không phải xếp hàng chờ đợi lâu.`,
+      organization: `Thiết lập ${toPlayerOrganization(playerCount, 'technical').groups} trạm kỹ thuật song song, joker hỗ trợ chuyền bóng và đổi nhóm sau mỗi phút để tăng số lần chạm bóng.`,
       howItWorks: [
         `Cầu thủ thực hiện chuỗi phối hợp chuyền và chạy chỗ được thiết kế riêng cho ${cleanTopic}.`,
         'Bóng xuất phát từ tuyến dưới, chuyền vào vị trí xoay xở trung tâm rồi mở bóng ra cánh chính xác.',
@@ -1145,6 +1161,7 @@ export function generateTrainingSession(
 
   const diagramBlocks = blocks.map((exercise) => ({
     ...exercise,
+    organization: explicitOrganization(exercise.organization, playerCount, exercise.playerOrganization!),
     pitchDiagram: buildDrillDiagram({
       blockType: exercise.blockType,
       exerciseName: exercise.exerciseName,
@@ -1171,7 +1188,7 @@ export function generateTrainingSession(
       month: '2-digit',
       year: 'numeric',
     }),
-    blocks: diagramBlocks,
+    blocks: diagramBlocks.map(exercise => withFormatContext(exercise, cleanTopic, gameFormat, playerCount)),
   };
 }
 
@@ -1180,16 +1197,17 @@ export function regenerateSingleExercise(
   current: Exercise,
   topic: string,
   playerCount: number,
-  seed: number
+  seed: number,
+  gameFormat: GameFormat = '7v7'
 ): Exercise {
   const names = collectVariationNames(topic, current.blockType);
   let nextSeed = Math.max(0, seed);
-  let session = generateTrainingSession(topic, playerCount, 90, nextSeed);
+  let session = generateTrainingSession(topic, playerCount, 90, nextSeed, gameFormat);
   let matched = session.blocks.find((b) => b.blockType === current.blockType);
 
   if (matched && names.length > 1 && matched.exerciseName === current.exerciseName) {
     nextSeed += 1;
-    session = generateTrainingSession(topic, playerCount, 90, nextSeed);
+    session = generateTrainingSession(topic, playerCount, 90, nextSeed, gameFormat);
     matched = session.blocks.find((b) => b.blockType === current.blockType);
   }
 

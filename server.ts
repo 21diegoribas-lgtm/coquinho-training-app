@@ -7,6 +7,7 @@ import { toPlayerOrganization, formatFromOrganization } from './src/services/pla
 import { normalizeDurationsToTotal } from './src/services/durationUtils.ts';
 import { sanitizeGeminiPlan, validateGeminiPlan } from './src/services/planValidation.ts';
 import { BlockType, GameFormat, SessionDuration } from './src/types/session.ts';
+import { formatPhaseContent, gameFormatTacticalGuidance } from './src/services/gameFormatContext.ts';
 
 dotenv.config();
 
@@ -169,7 +170,7 @@ const TRAINING_PLAN_SCHEMA = {
                 description: 'Legacy field; prefer leftover. Use 0 unless leftover is modeled as rotation.',
               },
             },
-            required: ['groups', 'playersPerGroup'],
+            required: ['groups', 'playersPerGroup', 'leftover', 'leftoverRole'],
           },
         },
         required: [
@@ -181,6 +182,7 @@ const TRAINING_PLAN_SCHEMA = {
           'area',
           'equipment',
           'organization',
+          'playerOrganization',
           'execution',
           'coachingPoints',
         ],
@@ -405,10 +407,14 @@ HƯỚNG DẪN LOẠI HÌNH THI ĐẤU (${gameFormat}) & QUÂN SỐ (${playerCou
 
 3. ${formatGuidelines.finalGameGuideline}
 
+4. QUAN HỆ KHÔNG GIAN VÀ HÀNH VI CHIẾN THUẬT:
+${gameFormatTacticalGuidance(gameFormat as GameFormat)}
+
 YÊU CẦU BẮT BUỘC ĐỐI VỚI NỘI DUNG TỪNG BÀI TẬP:
 - exerciseName: Tên bài tập cụ thể, thể hiện rõ thể thức và tính chất chuyên môn.
 - area: Kích thước sân (dài x rộng m) PHẢI TUÂN THỦ dải kích thước của ${gameFormat} nêu trên, tránh kích thước phi thực tế.
 - organization: Ghi rõ số lượng nhóm, bố trí sân bãi, phân chia toàn bộ ${playerCount} cầu thủ không bỏ sót ai. Trong giai đoạn kỹ thuật, ưu tiên nhiều nhóm nhỏ để tối đa số lần lặp lại.
+- playerOrganization is required for EVERY phase. groups * playersPerGroup + leftover must equal ${playerCount}; phase.players must also equal ${playerCount}. Count every attacker, defender and goalkeeper inside each group. Explicitly describe leftover players as active jokers/servers or a short rotating/resting role in organization, with frequent swaps. The organization text must describe exactly the same allocation. For example, 14 = 3 groups of 4 + 2 rotating jokers; 18 = 3 parallel 4v2 fields. Never write 3 groups of 4 for 14 without the extra roles, or 3 parallel 3v1 fields for 18. Keep small technical groups and frequent touches.
 - execution: Hướng dẫn vận hành chi tiết: bóng phát ra từ đâu, di chuyển thế nào, yêu cầu kỹ thuật đối với người nhận bóng, điều kiện ghi điểm, cơ chế luân chuyển xoay tua giữa các cầu thủ.
 - coachingPoints: 3-4 câu khẩu lệnh chuyên môn ngắn gọn, chỉ rõ tư thế cơ thể, cách quan sát và xử lý bóng (không lặp lại câu chữ giữa các giai đoạn).
 - progression: 1-2 biến thể điều chỉnh độ khó hợp lý (giới hạn chạm, tăng/giảm khoảng cách, bổ sung hậu vệ gây áp lực).
@@ -837,20 +843,25 @@ function generateRealisticFootballPlan(
   }
 
   // Construct final conforming phases
-  const phases = phasesData.map((p, idx) => ({
+  const phases = phasesData.map((p, idx) => {
+    const { spatialSetup, ...content } = formatPhaseContent(gameFormat as GameFormat, blockTypes[idx], cleanTopic, {
+      ...p, exerciseName: idx === 4 ? finalGameExerciseName : p.exerciseName,
+    });
+    return {
     id: `phase-${idx + 1}`,
     phase: p.phase,
-    exerciseName: idx === 4 ? finalGameExerciseName : p.exerciseName,
+    exerciseName: content.exerciseName,
     duration: durations[idx],
     players: players,
     area: idx === 4 ? finalGameArea : defaultAreas[idx],
     equipment: p.equipment,
-    organization: `${p.organization} ${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}.`,
-    execution: p.execution,
-    coachingPoints: p.coachingPoints,
-    progression: p.progression,
+    organization: `${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}. ${spatialSetup}`,
+    execution: content.execution,
+    coachingPoints: content.coachingPoints,
+    progression: content.progression,
     playerOrganization: toPlayerOrganization(players, blockTypes[idx]),
-  }));
+    };
+  });
 
   return {
     sessionTitle: title,
@@ -929,7 +940,7 @@ app.post('/api/generate-plan', async (req: Request, res: Response) => {
 
         if (response && response.text) {
           const raw = JSON.parse(response.text);
-          if (validateGeminiPlan(raw).ok) {
+          if (sanitizeGeminiPlan(raw, { topic: cleanFocus, players: playerCount, duration: durationNum as SessionDuration, gameFormat: cleanGameFormat })) {
             parsedPlan = { ...raw, generationSource: 'gemini' };
             console.log(`Successfully generated training plan with model: ${model}`);
             break;

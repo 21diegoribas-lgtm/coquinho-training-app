@@ -115,7 +115,8 @@ export default function App() {
       exercise,
       currentSession.topic,
       currentSession.playerCount,
-      nextSeed
+      nextSeed,
+      currentSession.gameFormat
     );
 
     setCurrentSession((prev) => ({

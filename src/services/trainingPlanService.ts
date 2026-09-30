@@ -15,6 +15,7 @@ import { formatFromOrganization, formatPlayerDistribution, toPlayerOrganization 
 import { sanitizeGeminiPlan } from './planValidation';
 import { normalizeDurationsToTotal } from './durationUtils';
 import { buildDrillDiagram } from './drillDiagramService';
+import { formatPhaseContent } from './gameFormatContext';
 
 /**
  * Validates inputs prior to calling the Gemini API
@@ -122,32 +123,22 @@ function buildLocalFallbackPlan(params: {
     phases: phaseNames.map((phase, idx) => {
       const blockType = blockTypes[idx];
       const org = toPlayerOrganization(params.players, blockType);
+      const { spatialSetup, ...content } = formatPhaseContent(format, blockType, topic, {
+        exerciseName: idx === 4 ? finalGameName : `${phase}: ${topic}`,
+        execution: `Cầu thủ thực hiện các bài tập ${phase.toLowerCase()} kết hợp chủ đề ${topic}.`,
+        coachingPoints: ['Kiểm tra vai trước khi nhận bóng.', 'Chạm bước một chủ động.'],
+        progression: 'Đổi hướng luân chuyển để dùng cả hai chân.',
+      });
       return {
         id: `phase-${idx + 1}`,
         phase,
-        exerciseName:
-          idx === 0
-            ? `Khởi động luân chuyển bóng & ${topic}`
-            : idx === 1
-              ? `Bài tập trạm kỹ thuật chuyên sâu: ${topic}`
-              : idx === 2
-                ? `Bài tập có định hướng đối kháng: ${topic}`
-                : idx === 3
-                  ? `Đối kháng nhóm nhỏ ghi điểm cầu môn mini`
-                  : finalGameName,
         duration: durations[idx],
         players: params.players,
         area: defaultAreas[idx],
         equipment: ['Bóng', 'Cọc tiêu', 'Áo bib'],
-        organization: `${formatPlayerDistribution(params.players, blockType)}. Bóng luân chuyển liên tục, hạn chế đứng chờ.`,
-        execution: `Cầu thủ thực hiện các bài tập ${phase.toLowerCase()} kết hợp chủ đề ${topic}.`,
-        coachingPoints: [
-          'Kiểm tra vai quan sát không gian trước khi nhận bóng.',
-          'Mở thân người về hướng tấn công tiếp theo.',
-          'Chạm bước một êm và chủ động.',
-        ],
-        progression: 'Giới hạn 2 chạm để tăng tốc độ xử lý; đổi hướng luân chuyển để dùng cả hai chân.',
+        organization: `${formatPlayerDistribution(params.players, blockType)}. ${spatialSetup}`,
         playerOrganization: org,
+        ...content,
       };
     }),
   };
