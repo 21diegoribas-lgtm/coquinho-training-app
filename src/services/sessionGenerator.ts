@@ -1,4 +1,4 @@
-import { Exercise, SessionDuration, TrainingSession, PitchDiagramData } from '../types/session';
+import { Exercise, GameFormat, SessionDuration, TrainingSession, PitchDiagramData } from '../types/session';
 import { formatPlayerDistribution, toPlayerOrganization } from './playerAccounting';
 import { buildDrillDiagram } from './drillDiagramService';
 
@@ -948,7 +948,8 @@ export function generateTrainingSession(
   topicInput: string,
   playerCount: number,
   duration: SessionDuration = 90,
-  seedVariation: number = 0
+  seedVariation: number = 0,
+  gameFormat: GameFormat = '7v7'
 ): TrainingSession {
   const cleanTopic = topicInput.trim() || 'Nhận bóng với tư thế mở & Quan sát không gian';
   const lower = cleanTopic.toLowerCase();
@@ -1006,6 +1007,7 @@ export function generateTrainingSession(
       playerCount,
       totalDuration: duration,
       selectedDuration: duration,
+      gameFormat: gameFormat || '7v7',
       createdAt: new Date().toLocaleDateString('vi-VN', {
         day: '2-digit',
         month: '2-digit',
@@ -1162,7 +1164,8 @@ export function generateTrainingSession(
     topic: cleanTopic,
     playerCount,
     totalDuration: duration,
-      selectedDuration: duration,
+    selectedDuration: duration,
+    gameFormat: gameFormat || '7v7',
     createdAt: new Date().toLocaleDateString('vi-VN', {
       day: '2-digit',
       month: '2-digit',

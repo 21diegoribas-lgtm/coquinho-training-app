@@ -2,6 +2,8 @@ export type BlockType = 'warm_up' | 'technical' | 'skill' | 'small_sided' | 'mat
 
 export type SessionDuration = 60 | 75 | 90;
 
+export type GameFormat = 'Futsal 5v5' | '7v7' | '9v9' | '11v11';
+
 export type Language = 'en' | 'vi';
 
 export interface PitchElement {
@@ -84,6 +86,7 @@ export interface TrainingSession {
   playerCount: number;
   totalDuration: number;
   selectedDuration?: SessionDuration;
+  gameFormat?: GameFormat;
   createdAt: string;
   blocks: Exercise[];
   generationSource?: GenerationSource;
@@ -93,5 +96,6 @@ export interface GenerateSessionParams {
   topic: string;
   playerCount: number;
   duration: SessionDuration;
+  gameFormat?: GameFormat;
   seedVariation?: number;
 }

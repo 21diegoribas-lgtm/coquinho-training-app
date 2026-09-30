@@ -1,6 +1,6 @@
 import { toPlayerOrganization } from './playerAccounting';
 import { GeminiTrainingPlan, TrainingPhase } from '../types/trainingPlan';
-import { Exercise, SessionDuration, TrainingSession } from '../types/session';
+import { Exercise, GameFormat, SessionDuration, TrainingSession } from '../types/session';
 import { isSessionDuration, normalizeDurationsToTotal } from './durationUtils';
 
 export const GENERIC_PROGRESSION =
@@ -88,7 +88,7 @@ export function validateGeminiPlan(plan: unknown): PlanValidationResult {
 
 export function sanitizeGeminiPlan(
   plan: unknown,
-  fallbacks: { topic: string; players: number; duration: SessionDuration }
+  fallbacks: { topic: string; players: number; duration: SessionDuration; gameFormat?: GameFormat }
 ): GeminiTrainingPlan | null {
   if (!plan || typeof plan !== 'object') return null;
   const raw = plan as Record<string, unknown>;
@@ -128,11 +128,16 @@ export function sanitizeGeminiPlan(
 
   if (!sessionTitle || players < 4 || !normalized.length) return null;
 
+  const gameFormat: GameFormat = ['Futsal 5v5', '7v7', '9v9', '11v11'].includes(raw.gameFormat as string)
+    ? (raw.gameFormat as GameFormat)
+    : (fallbacks.gameFormat || '7v7');
+
   return {
     sessionTitle,
     mainObjective: asNonEmptyString(raw.mainObjective, `Phát triển kỹ năng ${fallbacks.topic}`),
     players,
     duration,
+    gameFormat,
     ageGroup: typeof raw.ageGroup === 'string' ? raw.ageGroup : undefined,
     sessionOverview: typeof raw.sessionOverview === 'string' ? raw.sessionOverview : undefined,
     phases: normalized,
@@ -205,6 +210,9 @@ export function sanitizeTrainingSession(session: unknown): TrainingSession | nul
     playerCount,
     totalDuration,
     selectedDuration: isSessionDuration(raw.selectedDuration) ? raw.selectedDuration : isSessionDuration(raw.totalDuration) ? raw.totalDuration : 90,
+    gameFormat: ['Futsal 5v5', '7v7', '9v9', '11v11'].includes(raw.gameFormat as string)
+      ? (raw.gameFormat as 'Futsal 5v5' | '7v7' | '9v9' | '11v11')
+      : '7v7',
     createdAt: asNonEmptyString(raw.createdAt, new Date().toLocaleDateString('vi-VN')),
     blocks: normalizedBlocks,
     generationSource:

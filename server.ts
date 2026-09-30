@@ -6,7 +6,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { toPlayerOrganization, formatFromOrganization } from './src/services/playerAccounting.ts';
 import { normalizeDurationsToTotal } from './src/services/durationUtils.ts';
 import { sanitizeGeminiPlan, validateGeminiPlan } from './src/services/planValidation.ts';
-import { BlockType, SessionDuration } from './src/types/session.ts';
+import { BlockType, GameFormat, SessionDuration } from './src/types/session.ts';
 
 dotenv.config();
 
@@ -22,7 +22,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-const GEMINI_MODEL_TIMEOUT_MS = 8000;
+const GEMINI_MODEL_TIMEOUT_MS = 25000;
 
 app.use(express.json());
 
@@ -79,6 +79,10 @@ const TRAINING_PLAN_SCHEMA = {
     duration: {
       type: Type.INTEGER,
       description: 'Tổng thời lượng buổi tập tính bằng phút (chính xác 60, 75, hoặc 90)',
+    },
+    gameFormat: {
+      type: Type.STRING,
+      description: 'Loại hình thi đấu / sân (Futsal 5v5, 7v7, 9v9, hoặc 11v11)',
     },
     ageGroup: {
       type: Type.STRING,
@@ -188,30 +192,230 @@ const TRAINING_PLAN_SCHEMA = {
     'mainObjective',
     'players',
     'duration',
+    'gameFormat',
     'phases',
   ],
 };
 
-const SYSTEM_INSTRUCTION = `Bạn là trợ lý xây dựng giáo án bóng đá cho huấn luyện viên bóng đá cộng đồng.
+const SYSTEM_INSTRUCTION = `Bạn là Giám đốc kỹ thuật & Chuyên gia đào tạo HLV bóng đá cộng đồng/phong trào chuyên nghiệp.
+Nhiệm vụ của bạn là xây dựng giáo án huấn luyện bóng đá chi tiết, có tính sư phạm và giá trị thực chiến cao, tập trung tuyệt đối vào mục tiêu chuyên môn cụ thể của buổi tập.
 
-Nhiệm vụ của bạn là tạo buổi tập thực tế, dễ tổ chức và phù hợp với số lượng cầu thủ.
+NGUYÊN TẮC HUẤN LUYỆN CỐT LÕI (CORE COACHING PRINCIPLES):
+1. MỤC TIÊU XUYÊN SUỐT: Mọi bài tập từ khởi động đến trận đấu kết thúc đều phải xoay quanh và lặp đi lặp lại hành vi kỹ-chiến thuật của chủ đề, không được biến thành bài tập chung chung.
+2. TẦN SUẤT TIẾP XÚC BÓNG CAO (HIGH REPETITIONS): Tối đa hóa số lần chạm bóng và ra quyết định của từng cá nhân. Tuyệt đối tránh để cầu thủ đứng xếp hàng chờ đợi lâu.
+3. TIẾN TRÌNH HUẤN LUYỆN LOGIC (PROGRESSION):
+   - Giai đoạn 1 (Khởi động / Kích hoạt): Nhận thức không gian, làm quen cảm giác bóng, thói quen quan sát và tư thế cơ thể cơ bản với áp lực thấp.
+   - Giai đoạn 2 (Kỹ thuật chuyên biệt): Chia nhiều nhóm nhỏ/trạm song song để tăng số lần lặp lại; nhận bóng từ nhiều góc độ khác nhau; nhấn mạnh tư thế thân người và chạm bước một.
+   - Giai đoạn 3 (Kỹ năng có đối kháng): Tình huống đối kháng thực tế có định hướng (ví dụ: 2v1, 3v2, 3v1, nhận bóng giữa các tuyến/between the lines).
+   - Giai đoạn 4 (Trò chơi đối kháng nhỏ - Small-sided game): Sân thu nhỏ có thưởng điểm cụ thể khi cầu thủ thực hiện thành công hành vi mục tiêu.
+   - Giai đoạn 5 (Trận đấu thực chiến có điều kiện): Trận đấu có luật tính điểm hoặc ràng buộc chiến thuật để kiểm tra xem hành vi mục tiêu có xuất hiện trong thi đấu thực tế không (TUYỆT ĐỐI TRÁNH "thi đấu tự do" vô điều kiện).
+4. QUY TẮC LOẠI HÌNH THI ĐẤU (GAME FORMAT INFLUENCE):
+   - Kích thước sân tập (Drill dimensions): Phải tương thích với bối cảnh loại hình thi đấu:
+     + Futsal 5v5: Không gian cô đọng, hẹp (Khởi động 15-20 × 12-15 m; Kỹ thuật 15-18 × 12-15 m; Kỹ năng 20-25 × 15-18 m; Trò chơi nhỏ 25-30 × 18-20 m; Thi đấu: Sân Futsal 38-40 × 18-20 m). Tránh hoàn toàn kích thước sân cỏ lớn.
+     + 7v7: Kích thước vừa phải, định hướng tam giác và góc hỗ trợ (Khởi động 20-25 × 20 m; Kỹ thuật 20-25 × 20-25 m; Kỹ năng 30-35 × 25 m; Trò chơi nhỏ 35-40 × 28-30 m; Thi đấu: Sân 7 người 50-55 × 30-35 m).
+     + 9v9: Không gian mở rộng hơn về chiều ngang và chiều sâu (Khởi động 25-30 × 25 m; Kỹ thuật 30-35 × 25-30 m; Kỹ năng 40-45 × 30-35 m; Trò chơi nhỏ 45-50 × 35-40 m; Thi đấu: Sân 9 người 65-70 × 45-50 m).
+     + 11v11: Không gian rộng lớn, liên kết giữa các tuyến (Khởi động 30-35 × 30 m; Kỹ thuật 35-40 × 30-35 m; Kỹ năng 45-55 × 40-45 m; Trò chơi nhỏ 55-65 × 45-50 m; Thi đấu: Nửa sân 11 người 60-65 × 45-55 m hoặc sân lớn tùy số lượng cầu thủ).
+   - Tổ chức nhóm (Group organization):
+     + Trong các giai đoạn kỹ thuật: LUÔN ưu tiên lặp lại nhiều lần bằng các nhóm nhỏ (3-4 người/nhóm) hoặc nhiều trạm kỹ thuật song song, NGAY CẢ KHI chọn loại hình 11v11 (Ví dụ: 16 cầu thủ + 11v11 vẫn phải chia 4 nhóm 4 để tối đa hóa số lần chạm bóng, TUYỆT ĐỐI KHÔNG gom 1 nhóm lớn đứng chờ).
+   - Trận đấu cuối cùng (Final game format & Player count rule):
+     + QUY TẮC SỐ LƯỢNG CẦU THỦ BẮT BUỘC: gameFormat TUYỆT ĐỐI KHÔNG ĐƯỢC làm sai lệch hoặc bịa thêm số lượng cầu thủ có mặt thực tế. Toàn bộ số cầu thủ tham gia buổi tập PHẢI được sắp xếp đầy đủ.
+     + Nếu số lượng cầu thủ ít hơn chuẩn của loại hình (ví dụ 16 cầu thủ chọn 11v11): BẮT BUỘC thiết kế thể thức thu nhỏ đại diện (reduced representative format) như 8v8 hoặc 7v7 + 2 Joker, mô phỏng các mối quan hệ tuyến của 11v11. TUYỆT ĐỐI KHÔNG tự bịa ra 22 cầu thủ!
+     + Ví dụ: 10 cầu thủ + Futsal 5v5 -> 5v5; 14 cầu thủ + 7v7 -> 7v7; 18 cầu thủ + 9v9 -> 9v9; 16 cầu thủ + 11v11 -> 8v8 (hoặc 7v7 + 2 Joker).
+5. KHÔNG DÙNG TỪ NGỮ CHUNG CHUNG:
+   - CẤM các câu mơ hồ như: "Chơi tự do", "Kiểm soát bóng", "Tập chuyền bóng", "Tận dụng khoảng trống".
+   - BẮT BUỘC mô tả chi tiết vận hành: Vị trí xuất phát của từng cầu thủ, bóng bắt đầu từ đâu, người nhận bóng làm gì (tư thế, chân nhận, hướng quan sát), luân chuyển tiếp theo thế nào, cơ chế xoay tua vị trí và cách tính điểm/thưởng điểm cụ thể.
+6. PHÂN BỔ QUÂN SỐ VÀ CẤU TRÚC NHÓM:
+   - Ưu tiên nhóm nhỏ (3-4 người) hoặc chia 2-3 sân mini song song trong các giai đoạn kỹ thuật & đối kháng kỹ năng để không ai phải đứng ngoài.
+   - Nếu số lượng cầu thủ không chia đều, bố trí cầu thủ làm Joker (tự do) tham gia cùng đội kiểm soát bóng hoặc quy định xoay tua nhanh theo lượt chuyền.
+7. ĐIỂM HUẤN LUYỆN (COACHING POINTS):
+   - Phải nêu rõ hành vi cụ thể của cầu thủ (Perception -> Decision -> Action: Cầu thủ quan sát gì? Ra quyết định gì? Thực hiện động tác ra sao?).
+   - Không lặp lại nguyên văn một câu chữ qua các giai đoạn; mỗi giai đoạn phải phản ánh độ khó và áp lực tương ứng.
+8. NGÔN NGỮ: Sử dụng thuật ngữ bóng đá tiếng Việt tự nhiên, trực quan, dễ hiểu bên đường pitch (ví dụ: "kiểm tra vai", "mở thân người góc 45 độ", "chân xa", "chạm bước một định hướng", "chuyền xuyên tuyến").
+9. ĐỊNH DẠNG: Trả về duy nhất dữ liệu JSON hợp lệ theo schema yêu cầu, không thêm bất kỳ văn bản giải thích nào khác.`;
 
-Ưu tiên:
-- nhiều thời gian cầu thủ tiếp xúc với bóng
-- ít thời gian đứng chờ
-- tổ chức đơn giản
-- progression hợp lý
-- coaching points rõ ràng
-- bài tập phù hợp mục tiêu buổi tập
+function getGameFormatGuidelines(gameFormat: string, playerCount: number): {
+  dimensionsGuideline: string;
+  groupOrgGuideline: string;
+  finalGameGuideline: string;
+} {
+  const perSide = Math.floor(playerCount / 2);
+  const remainder = playerCount % 2;
 
-Mỗi giáo án phải thích ứng với:
-- số lượng cầu thủ
-- chủ đề tập luyện
-- thời lượng
+  switch (gameFormat) {
+    case 'Futsal 5v5': {
+      const finalStructure = remainder === 0
+        ? (playerCount === 10 ? '5v5 Futsal tiêu chuẩn' : `${perSide}v${perSide} Futsal`)
+        : `${perSide}v${perSide} (+1 Joker tự do)`;
+      return {
+        dimensionsGuideline: `KÍCH THƯỚC KHU VỰC TẬP (FUTSAL 5V5 - KHÔNG GIAN HẸP):
+- Đặc trưng: Không gian cô đọng, cự ly hẹp để kích thích phản xạ nhanh và chạm bước một tinh tế.
+- Khởi động: 15-20 × 12-15 m
+- Kỹ thuật: 15-18 × 12-15 m (chia các trạm nhỏ)
+- Kỹ năng / Đối kháng: 20-25 × 15-18 m (có định hướng cự ly ngắn)
+- Trò chơi nhỏ (SSG): 25-30 × 18-20 m (4 cầu môn nhỏ hoặc 2 khung thành Futsal)
+- Trận đấu cuối: Sân Futsal tiêu chuẩn 38-40 × 18-20 m.
+- CẢNH BÁO: TUYỆT ĐỐI TRÁNH kích thước sân cỏ lớn (như 50m hay 60m) không phù hợp với Futsal.`,
+        groupOrgGuideline: `TỔ CHỨC NHÓM (FUTSAL 5V5):
+- Ưu tiên nhóm rất nhỏ (2-3 cầu thủ), rondo 3v1, 2v1, 4v2 hoặc đối kháng 2v2 / 3v3 nhiều sân mini.
+- Tần suất chạm bóng và số lần lặp lại phải cực cao, bóng luân chuyển liên tục, không ai đứng chờ.`,
+        finalGameGuideline: `TRẬN ĐẤU CUỐI (FUTSAL 5V5):
+- Mô phỏng cấu trúc trận đấu Futsal 5v5 với đúng ${playerCount} cầu thủ có mặt: ${finalStructure} trên sân Futsal (38-40 × 18-20 m).
+- TUYỆT ĐỐI KHÔNG bịa thêm cầu thủ. Áp dụng luật Futsal và điều kiện tính điểm chuyên đề.`,
+      };
+    }
+    case '7v7': {
+      const finalStructure = remainder === 0
+        ? (playerCount === 14 ? '7v7 hoàn chỉnh' : `${perSide}v${perSide}`)
+        : `${perSide}v${perSide} (+1 Joker tự do)`;
+      return {
+        dimensionsGuideline: `KÍCH THƯỚC KHU VỰC TẬP (SÂN 7V7 - CỰ LY ĐỊNH HƯỚNG TAM GIÁC):
+- Đặc trưng: Không gian cự ly trung bình, tối ưu hóa các khối tam giác và góc liên kết sân 7.
+- Khởi động: 20-25 × 20 m
+- Kỹ thuật: 20-25 × 20-25 m (nhiều trạm kim cương/tam giác)
+- Kỹ năng / Đối kháng: 30-35 × 25 m (chia làn hoặc khu vực chuyển đổi)
+- Trò chơi nhỏ (SSG): 35-40 × 28-30 m (có cầu môn nhỏ hoặc cầu môn sân 7)
+- Trận đấu cuối: Sân 7 người tiêu chuẩn 50-55 × 30-35 m.`,
+        groupOrgGuideline: `TỔ CHỨC NHÓM (SÂN 7V7):
+- Nhóm kỹ thuật: 3-4 cầu thủ (tổ tam giác 3v1, 4v2 hoặc 2 trạm kỹ thuật song song).
+- Giai đoạn kỹ năng: 3v2, 4v3, hoặc 2 sân nhỏ 3v3/4v4 để duy trì số lần chạm bóng cao cho toàn bộ ${playerCount} cầu thủ.`,
+        finalGameGuideline: `TRẬN ĐẤU CUỐI (SÂN 7V7):
+- Phản ánh không gian và cự ly sân 7 người với đúng ${playerCount} cầu thủ: ${finalStructure} trên sân 7 người (50-55 × 30-35 m).
+- TUYỆT ĐỐI KHÔNG bịa thêm cầu thủ. Toàn bộ ${playerCount} cầu thủ đều tham gia thi đấu (chia 2 đội cân bằng + Joker nếu lẻ).`,
+      };
+    }
+    case '9v9': {
+      const finalStructure = remainder === 0
+        ? (playerCount === 18 ? '9v9 hoàn chỉnh' : `${perSide}v${perSide} định hướng 9v9`)
+        : `${perSide}v${perSide} (+1 Joker tự do)`;
+      return {
+        dimensionsGuideline: `KÍCH THƯỚC KHU VỰC TẬP (SÂN 9V9 - MỞ RỘNG CHIỀU NGANG VÀ CHIỀU SÂU):
+- Đặc trưng: Mở rộng chiều ngang và chiều sâu để rèn luyện cự ly chuyền trung bình, đổi cánh và khai thác nách trung lộ.
+- Khởi động: 25-30 × 25 m
+- Kỹ thuật: 30-35 × 25-30 m (tổ hợp mở biên và xuyên tuyến)
+- Kỹ năng / Đối kháng: 40-45 × 30-35 m (có chiều sâu chuyển trạng thái)
+- Trò chơi nhỏ (SSG): 45-50 × 35-40 m (hai cầu môn có thủ môn)
+- Trận đấu cuối: Sân 9 người tiêu chuẩn 65-70 × 45-50 m.`,
+        groupOrgGuideline: `TỔ CHỨC NHÓM (SÂN 9V9):
+- Giai đoạn kỹ thuật: VẪN PHẢI ƯU TIÊN LẶP LẠI CAO (chia nhóm 3-4 người hoặc nhiều trạm song song), KHÔNG dồn nhóm lớn đứng chờ.
+- Giai đoạn kỹ năng: Cho phép mở rộng nhóm 4v4+2, 5v4 hoặc chia 2 sân mini song song để mọi cầu thủ đều hoạt động liên tục.`,
+        finalGameGuideline: `TRẬN ĐẤU CUỐI (SÂN 9V9):
+- Phản ánh mối quan hệ chiến thuật và chiều sâu của sân 9 người với đúng ${playerCount} cầu thủ: ${finalStructure} trên sân 9 người (65-70 × 45-50 m).
+- TUYỆT ĐỐI KHÔNG bịa thêm cầu thủ.`,
+      };
+    }
+    case '11v11': {
+      const finalStructure = remainder === 0
+        ? `${perSide}v${perSide} (Thể thức thu nhỏ đại diện - Reduced representative format)`
+        : `${perSide}v${perSide} (+1 Joker tự do mô phỏng trục giữa 11v11)`;
+      return {
+        dimensionsGuideline: `KÍCH THƯỚC KHU VỰC TẬP (11V11 - KHÔNG GIAN LỚN & LIÊN KẾT TUYẾN):
+- Đặc trưng: Không gian mở rộng, khoảng cách chuyền xa hơn, liên kết giữa các tuyến (hậu vệ - tiền vệ - tiền đạo).
+- Khởi động: 30-35 × 30 m (kích hoạt cự ly di chuyển rộng)
+- Kỹ thuật: 35-40 × 30-35 m (chia 3-4 trạm nhỏ song song để tối đa hóa số lần chạm bóng)
+- Kỹ năng / Đối kháng: 45-55 × 40-45 m (nhận bóng xuyên tuyến, liên kết khối)
+- Trò chơi nhỏ (SSG): 55-65 × 45-50 m (đối kháng có chiều sâu)
+- Trận đấu cuối: Nửa sân 11 người (60-65 × 45-55 m) hoặc sân lớn có cự ly tổ chức theo tuyến đại diện 11v11.`,
+        groupOrgGuideline: `TỔ CHỨC NHÓM (11V11 - ĐẶC BIỆT LƯU Ý):
+- NGUYÊN TẮC BẮT BUỘC: Giai đoạn kỹ thuật KHÔNG ĐƯỢC tổ chức thành một nhóm lớn duy nhất chỉ vì là 11v11! PHẢI chia thành các nhóm nhỏ (ví dụ: 16 người chia 4 nhóm 4; 18 người chia 6 nhóm 3 hoặc 4 nhóm 4+2) để đảm bảo tần suất lặp lại kỹ thuật cao nhất.
+- Giai đoạn kỹ năng & đối kháng: Tận dụng không gian rộng để rèn luyện thói quen mở thân người, nhận bóng giữa các tuyến và chuyển hướng tấn công.`,
+        finalGameGuideline: `TRẬN ĐẤU CUỐI (11V11 - QUY TẮC THỂ THỨC ĐẠI DIỆN):
+- QUY TẮC SỐ LƯỢNG CẦU THỦ BẮT BUỘC: Loại hình 11v11 đại diện cho bối cảnh thi đấu, TUYỆT ĐỐI KHÔNG ĐƯỢC TỰ BỊA RA 22 CẦU THỦ!
+- CHỈ ĐƯỢC SỬ DỤNG ĐÚNG ${playerCount} CẦU THỦ CÓ MẶT để tổ chức thể thức thu nhỏ đại diện (Reduced representative game: ${finalStructure}) trên nửa sân lớn 60-65 × 45-55 m.
+- Các cầu thủ được bố trí theo cấu trúc các tuyến (ví dụ: hậu vệ - tiền vệ - tiền đạo thu nhỏ) để trải nghiệm không gian và áp lực chiến thuật của 11v11.`,
+      };
+    }
+    default:
+      return getGameFormatGuidelines('7v7', playerCount);
+  }
+}
 
-Sử dụng tiếng Việt chuyên môn bóng đá tự nhiên.
+function buildCoachingPrompt(
+  playerCount: number,
+  cleanFocus: string,
+  durationNum: number,
+  gameFormat: string = '7v7'
+): string {
+  const lower = cleanFocus.toLowerCase();
 
-Không thêm giải thích ngoài JSON được yêu cầu.`;
+  let topicGuidelines = '';
+  if (lower.includes('nhận bóng') || lower.includes('mở') || lower.includes('quan sát')) {
+    topicGuidelines = `
+CHUYÊN ĐỀ "NHẬN BÓNG MỞ THÂN NGƯỜI & QUAN SÁT KHÔNG GIAN":
+- Hành vi mong đợi của cầu thủ:
+  + Quan sát vai (scan/kiểm tra vai) trước khi bóng đến để nhận biết khoảng trống và áp lực của đối phương.
+  + Đứng tư thế mở thân người góc 45 độ (half-turn) để nhìn thấy cả bóng lẫn hướng tấn công.
+  + Đón bóng bằng chân xa (back foot) khi có khoảng trống để sẵn sàng tịnh tiến bóng lên phía trước.
+  + Chạm bước một có định hướng (directional first touch) vào khoảng trống có lợi thay vì hãm chết bóng tại chỗ.
+  + Nhận biết thời điểm có áp lực từ phía sau để nhả bóng 1 chạm hoặc che chắn, và khi có khoảng trống thì xoay người tiến lên.
+  + Chơi bóng về phía trước (play forward) ngay khi có cơ hội.
+- CẢNH BÁO: KHÔNG ĐƯỢC thiết kế như một bài chuyền bóng rondo ma thụ động thông thường. Buổi tập phải có hướng tịnh tiến bóng rõ ràng từ đầu đến cuối.`;
+  } else if (lower.includes('giữa các tuyến') || lower.includes('between lines')) {
+    topicGuidelines = `
+CHUYÊN ĐỀ "NHẬN BÓNG GIỮA CÁC TUYẾN (RECEIVING BETWEEN THE LINES)":
+- Hành vi mong đợi của cầu thủ:
+  + Căn thời điểm (timing) di chuyển vào "túi không gian" (pocket of space) giữa hàng tiền vệ và hậu vệ đối phương.
+  + Đứng tư thế nửa thân người (half-turn) hướng về phía cầu môn đối phương trước khi bóng tới.
+  + Nhận bóng bằng chân xa để sẵn sàng xoay người đột phá hoặc chọc khe tiếp theo.
+  + Nhận biết áp lực từ lưng để ra quyết định: xoay người tịnh tiến nếu có khoảng trống, nhả bóng lại 1 chạm (lay-off) nếu bị áp sát.`;
+  } else if (lower.includes('pressing') || lower.includes('áp sát') || lower.includes('đoạt bóng')) {
+    topicGuidelines = `
+CHUYÊN ĐỀ "PRESSING TẦM CAO & VÂY BẮT ĐOẠT BÓNG":
+- Hành vi mong đợi của cầu thủ:
+  + Nhận diện tín hiệu kích hoạt pressing (pressing trigger): bóng bay bổng, đối thủ quay lưng, đường chuyền non, đối thủ đỡ bóng lỗi.
+  + Cầu thủ gần nhất áp sát nhanh, hạ trọng tâm, dùng cơ thể che hướng chuyền nguy hiểm nhất (bẻ hướng đối thủ vào bẫy).
+  + Các cầu thủ xung quanh lập tức thu hẹp cự ly đội hình, khóa chặt các lựa chọn chuyền bóng gần nhất của đối thủ.
+  + Khi đoạt được bóng: lập tức chuyển đổi trạng thái tấn công nhanh hoặc giữ bóng an toàn thoát áp lực.`;
+  } else if (lower.includes('1v1') || lower.includes('qua người') || lower.includes('rê bóng') || lower.includes('dẫn bóng')) {
+    topicGuidelines = `
+CHUYÊN ĐỀ "1V1 QUA NGƯỜI / ĐẤU TAY ĐÔI TẤN CÔNG":
+- Hành vi mong đợi của cầu thủ:
+  + Dẫn bóng chủ động tấn công vào khoảng trống trước mặt người phòng ngự.
+  + Thay đổi nhịp độ (hãm bóng rồi bứt tốc), hạ thấp trọng tâm khi thực hiện động tác giả.
+  + Đọc hướng đứng chân của hậu vệ để khai thác chân trụ yếu của đối thủ.
+  + Ra quyết định dứt khoát: vượt qua đối thủ hay che chắn giữ bóng; bứt tốc thoát hẳn sau khi qua người.
+- Tổ chức: Chia nhiều làn 1v1 song song (ví dụ: 3-4 làn đối đầu 1v1) để tối đa hóa số lần đối đầu, không để cầu thủ xếp hàng dài.`;
+  } else if (lower.includes('chuyền') || lower.includes('di chuyển') || lower.includes('phối hợp')) {
+    topicGuidelines = `
+CHUYÊN ĐỀ "CHUYỀN BÓNG VÀ DI CHUYỂN HỖ TRỢ":
+- Hành vi mong đợi của cầu thủ:
+  + Chuyền bóng đúng lực, đúng chân thuận của đồng đội, đường chuyền có thông điệp (chuyền vào chân để giữ hay chuyền vào khoảng trống để chạy).
+  + Di chuyển hỗ trợ ngay sau khi chuyền bóng (pass and move), không đứng yên nhìn bóng.
+  + Tạo các góc chuyền hình tam giác và hình kim cương; phối hợp người thứ 3 (third-man run).
+  + Quan sát không gian trước khi nhận bóng để duy trì nhịp độ luân chuyển nhanh.`;
+  } else {
+    topicGuidelines = `
+CHUYÊN ĐỀ "${cleanFocus}":
+- Xây dựng buổi tập xoay quanh hành vi kỹ-chiến thuật cụ thể nhất của "${cleanFocus}".
+- Mỗi bài tập phải giải quyết: Cầu thủ quan sát thấy gì? Cần ra quyết định gì? Hành động kỹ thuật nào được kích hoạt?`;
+  }
+
+  const formatGuidelines = getGameFormatGuidelines(gameFormat, playerCount);
+
+  return `YÊU CẦU THIẾT KẾ GIÁO ÁN BÓNG ĐÁ CHUYÊN SÂU:
+- Số lượng cầu thủ: ${playerCount} cầu thủ (BẮT BUỘC: chỉ sử dụng đúng ${playerCount} cầu thủ, KHÔNG ĐƯỢC thêm bớt)
+- Chủ đề trọng tâm: ${cleanFocus}
+- Tổng thời lượng buổi tập: ${durationNum} phút (Tổng duration của các phases PHẢI BẰNG CHÍNH XÁC ${durationNum} phút)
+- Loại hình thi đấu / sân: ${gameFormat}
+${topicGuidelines}
+
+HƯỚNG DẪN LOẠI HÌNH THI ĐẤU (${gameFormat}) & QUÂN SỐ (${playerCount} CẦU THỦ):
+1. ${formatGuidelines.dimensionsGuideline}
+
+2. ${formatGuidelines.groupOrgGuideline}
+
+3. ${formatGuidelines.finalGameGuideline}
+
+YÊU CẦU BẮT BUỘC ĐỐI VỚI NỘI DUNG TỪNG BÀI TẬP:
+- exerciseName: Tên bài tập cụ thể, thể hiện rõ thể thức và tính chất chuyên môn.
+- area: Kích thước sân (dài x rộng m) PHẢI TUÂN THỦ dải kích thước của ${gameFormat} nêu trên, tránh kích thước phi thực tế.
+- organization: Ghi rõ số lượng nhóm, bố trí sân bãi, phân chia toàn bộ ${playerCount} cầu thủ không bỏ sót ai. Trong giai đoạn kỹ thuật, ưu tiên nhiều nhóm nhỏ để tối đa số lần lặp lại.
+- execution: Hướng dẫn vận hành chi tiết: bóng phát ra từ đâu, di chuyển thế nào, yêu cầu kỹ thuật đối với người nhận bóng, điều kiện ghi điểm, cơ chế luân chuyển xoay tua giữa các cầu thủ.
+- coachingPoints: 3-4 câu khẩu lệnh chuyên môn ngắn gọn, chỉ rõ tư thế cơ thể, cách quan sát và xử lý bóng (không lặp lại câu chữ giữa các giai đoạn).
+- progression: 1-2 biến thể điều chỉnh độ khó hợp lý (giới hạn chạm, tăng/giảm khoảng cách, bổ sung hậu vệ gây áp lực).
+- Giai đoạn cuối cùng (Thi đấu): Bắt buộc có luật thưởng điểm hoặc điều kiện chiến thuật gắn trực tiếp với chủ đề "${cleanFocus}". TUYỆT ĐỐI KHÔNG để thi đấu tự do thông thường.
+
+Hãy tạo giáo án xuất sắc, chuẩn mực sư phạm và trả về đúng định dạng JSON yêu cầu.`;
+}
 
 /**
  * Intelligent Community Football Plan Generator
@@ -226,7 +430,8 @@ Không thêm giải thích ngoài JSON được yêu cầu.`;
 function generateRealisticFootballPlan(
   players: number,
   topic: string,
-  duration: number
+  duration: number,
+  gameFormat: string = '7v7'
 ) {
   const cleanTopic = topic.trim();
   const lower = cleanTopic.toLowerCase();
@@ -335,7 +540,7 @@ function generateRealisticFootballPlan(
         area: '55 × 38 m (Sân 7 tiêu chuẩn)',
         equipment: ['2 Khung thành tiêu chuẩn', 'Bóng thi đấu', 'Áo bib phân biệt rõ ràng'],
         organization: `Thi đấu 2 đội trên toàn sân, có thủ môn. Áp dụng toàn bộ luật bóng đá thực chiến. `,
-        execution: 'Trận đấu tự do. Huấn luyện viên dừng trận đấu ngắn (Freeze) 1-2 lần để nhấn mạnh các tình huống cầu thủ mở thân người thoát pressing xuất sắc.',
+        execution: 'Trận đấu có điều kiện mục tiêu: Thi đấu 2 đội trên toàn sân có thủ môn. Áp dụng luật tính điểm: Bàn thắng bình thường tính 1 điểm; bàn thắng xuất phát từ pha nhận bóng mở thân người tịnh tiến qua tuyến đối phương tính 2 điểm.',
         coachingPoints: [
           'Thói quen quan sát xung quanh liên tục kể cả khi không có bóng.',
           'Mở góc thân người trước mọi pha nhận bóng trên toàn mặt sân.',
@@ -573,14 +778,72 @@ function generateRealisticFootballPlan(
     ];
   }
 
+  // Format-aware dimensions and match adaptations
+  let defaultAreas: [string, string, string, string, string];
+  let finalGameExerciseName: string;
+  let finalGameArea: string;
+  const perSide = Math.floor(players / 2);
+  const remainder = players % 2;
+
+  if (gameFormat === 'Futsal 5v5') {
+    defaultAreas = [
+      '18 × 15 m (Không gian hẹp Futsal)',
+      '16 × 14 m (Khu vực kỹ thuật cô đọng)',
+      '22 × 16 m (Định hướng cự ly ngắn)',
+      '28 × 18 m (Đối kháng sân nhỏ Futsal)',
+      '38 × 20 m (Sân Futsal tiêu chuẩn)',
+    ];
+    finalGameExerciseName = remainder === 0
+      ? (players === 10 ? 'Trận đấu Futsal 5v5 tiêu chuẩn' : `Thi đấu Futsal ${perSide}v${perSide}`)
+      : `Thi đấu Futsal ${perSide}v${perSide} (+1 Joker tự do)`;
+    finalGameArea = '38 × 20 m (Sân Futsal tiêu chuẩn)';
+  } else if (gameFormat === '9v9') {
+    defaultAreas = [
+      '28 × 25 m (Khu vực mở rộng cự ly 9v9)',
+      '32 × 28 m (Tổ hợp phối hợp trung bình)',
+      '42 × 32 m (Liên kết chuyển hướng rộng)',
+      '48 × 36 m (Đối kháng mở rộng biên)',
+      '68 × 48 m (Sân 9 người tiêu chuẩn)',
+    ];
+    finalGameExerciseName = remainder === 0
+      ? (players === 18 ? 'Trận đấu 9v9 hoàn chỉnh toàn sân' : `Trận đấu 9v9 thu nhỏ: ${perSide}v${perSide}`)
+      : `Trận đấu 9v9: ${perSide}v${perSide} (+1 Joker tự do)`;
+    finalGameArea = '68 × 48 m (Sân 9 người tiêu chuẩn)';
+  } else if (gameFormat === '11v11') {
+    defaultAreas = [
+      '30 × 30 m (Khu vực cự ly mở rộng 11v11)',
+      '35 × 30 m (Chia nhiều trạm kỹ thuật song song)',
+      '48 × 40 m (Liên kết cự ly giữa các tuyến)',
+      '55 × 45 m (Đối kháng không gian lớn)',
+      '65 × 50 m (Nửa sân 11 người tiêu chuẩn)',
+    ];
+    finalGameExerciseName = remainder === 0
+      ? (players >= 22 ? 'Trận đấu 11v11 hoàn chỉnh toàn sân' : `Thi đấu thể thức đại diện 11v11: ${perSide}v${perSide}`)
+      : `Thi đấu thể thức đại diện 11v11: ${perSide}v${perSide} (+1 Joker)`;
+    finalGameArea = '65 × 50 m (Nửa sân 11 người tiêu chuẩn)';
+  } else {
+    // 7v7 default
+    defaultAreas = [
+      '25 × 20 m (Khu vực sân 7)',
+      '22 × 20 m (Tổ hợp cự ly ngắn-trung bình)',
+      '35 × 25 m (Chia khu vực chuyển đổi)',
+      '40 × 30 m (4 cầu môn nhỏ ở 4 góc)',
+      '55 × 35 m (Sân 7 người tiêu chuẩn)',
+    ];
+    finalGameExerciseName = remainder === 0
+      ? (players === 14 ? 'Trận đấu 7v7 hoàn chỉnh trên sân 7' : `Trận đấu đối kháng sân 7: ${perSide}v${perSide}`)
+      : `Trận đấu đối kháng sân 7: ${perSide}v${perSide} (+1 Joker tự do)`;
+    finalGameArea = '55 × 35 m (Sân 7 người tiêu chuẩn)';
+  }
+
   // Construct final conforming phases
   const phases = phasesData.map((p, idx) => ({
     id: `phase-${idx + 1}`,
     phase: p.phase,
-    exerciseName: p.exerciseName,
+    exerciseName: idx === 4 ? finalGameExerciseName : p.exerciseName,
     duration: durations[idx],
     players: players,
-    area: p.area,
+    area: idx === 4 ? finalGameArea : defaultAreas[idx],
     equipment: p.equipment,
     organization: `${p.organization} ${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}.`,
     execution: p.execution,
@@ -594,6 +857,7 @@ function generateRealisticFootballPlan(
     mainObjective: objective,
     players,
     duration,
+    gameFormat,
     ageGroup: 'Bóng đá cộng đồng / Phong trào',
     sessionOverview: `Buổi tập ${duration} phút gồm 5 giai đoạn liên hoàn dành cho ${players} cầu thủ, tối ưu hóa thời gian tiếp xúc bóng và hạn chế tối đa đứng chờ.`,
     phases,
@@ -603,7 +867,7 @@ function generateRealisticFootballPlan(
 // API endpoint to generate football training plan with Gemini + resilient fallback
 app.post('/api/generate-plan', async (req: Request, res: Response) => {
   try {
-    const { players, trainingFocus, duration } = req.body ?? {};
+    const { players, trainingFocus, duration, gameFormat } = req.body ?? {};
 
     // 1. Validation before calling API
     const playerCount = Number(players);
@@ -626,13 +890,19 @@ app.post('/api/generate-plan', async (req: Request, res: Response) => {
       });
     }
 
+    const ALLOWED_GAME_FORMATS: GameFormat[] = ['Futsal 5v5', '7v7', '9v9', '11v11'];
+    let cleanGameFormat: GameFormat = '7v7';
+    if (gameFormat !== undefined && gameFormat !== null && gameFormat !== '') {
+      if (!ALLOWED_GAME_FORMATS.includes(gameFormat)) {
+        return res.status(400).json({
+          error: 'Loại hình thi đấu không hợp lệ. Chỉ chấp nhận: Futsal 5v5, 7v7, 9v9, 11v11.',
+        });
+      }
+      cleanGameFormat = gameFormat;
+    }
+
     const cleanFocus = trainingFocus.trim();
-
-    const prompt = `Số lượng cầu thủ: ${playerCount}
-Nội dung tập luyện: ${cleanFocus}
-Thời lượng: ${durationNum} phút
-
-Hãy tạo một giáo án bóng đá phù hợp với các thông tin trên và trả về đúng JSON theo cấu trúc được yêu cầu.`;
+    const prompt = buildCoachingPrompt(playerCount, cleanFocus, durationNum, cleanGameFormat);
 
     let parsedPlan: any = null;
 
@@ -675,10 +945,18 @@ Hãy tạo một giáo án bóng đá phù hợp với các thông tin trên và
     // 3. Resilient fallback generator if upstream AI models encounter quota exhaustion or temporary spikes
     if (!parsedPlan) {
       console.log('Using resilient community football plan generator for request.');
-      parsedPlan = { ...generateRealisticFootballPlan(playerCount, cleanFocus, durationNum), generationSource: 'fallback' };
+      parsedPlan = {
+        ...generateRealisticFootballPlan(playerCount, cleanFocus, durationNum, cleanGameFormat),
+        generationSource: 'fallback',
+      };
     }
 
-    const safePlan = sanitizeGeminiPlan(parsedPlan, { topic: cleanFocus, players: playerCount, duration: durationNum as SessionDuration });
+    const safePlan = sanitizeGeminiPlan(parsedPlan, {
+      topic: cleanFocus,
+      players: playerCount,
+      duration: durationNum as SessionDuration,
+      gameFormat: cleanGameFormat,
+    });
     if (!safePlan) throw new Error('Invalid generated plan');
     return res.json(safePlan);
   } catch (error: any) {

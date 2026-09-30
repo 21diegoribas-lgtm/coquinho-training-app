@@ -1,13 +1,16 @@
-import React, { useState } from 'react';
-import { Users, Clock, Target, Play, RotateCw, AlertCircle } from 'lucide-react';
-import { SessionDuration } from '../types/session';
+import React, { useState, useEffect } from 'react';
+import { Users, Clock, Target, Play, RotateCw, AlertCircle, Shield } from 'lucide-react';
+import { GameFormat, SessionDuration } from '../types/session';
 
 interface SessionInputCardProps {
-  onGenerate: (topic: string, players: number, duration: SessionDuration) => void;
+  onGenerate: (topic: string, players: number, duration: SessionDuration, gameFormat: GameFormat) => void;
   isGenerating?: boolean;
   errorMessage?: string | null;
   onClearError?: () => void;
+  initialGameFormat?: GameFormat;
 }
+
+export const GAME_FORMAT_OPTIONS: GameFormat[] = ['Futsal 5v5', '7v7', '9v9', '11v11'];
 
 const TOPIC_PRESETS = [
   'Nhận bóng với tư thế mở & Quan sát',
@@ -23,11 +26,19 @@ export const SessionInputCard: React.FC<SessionInputCardProps> = ({
   isGenerating = false,
   errorMessage = null,
   onClearError,
+  initialGameFormat = '7v7',
 }) => {
   const [topic, setTopic] = useState('Nhận bóng với tư thế mở & Quan sát');
   const [playerCount, setPlayerCount] = useState<number>(16);
+  const [gameFormat, setGameFormat] = useState<GameFormat>(initialGameFormat);
   const [duration, setDuration] = useState<SessionDuration>(90);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialGameFormat) {
+      setGameFormat(initialGameFormat);
+    }
+  }, [initialGameFormat]);
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -55,7 +66,7 @@ export const SessionInputCard: React.FC<SessionInputCardProps> = ({
     }
 
     setValidationError(null);
-    onGenerate(cleanTopic, playerCount, duration);
+    onGenerate(cleanTopic, playerCount, duration, gameFormat);
   };
 
   const handlePlayerChange = (val: number) => {
@@ -83,9 +94,9 @@ export const SessionInputCard: React.FC<SessionInputCardProps> = ({
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-12">
           {/* 1. Số lượng cầu thủ */}
-          <div className="lg:col-span-4">
+          <div className="sm:col-span-1 lg:col-span-4">
             <label
               htmlFor="players-input"
               className="block text-xs font-bold uppercase tracking-wider text-stone-700"
@@ -132,13 +143,47 @@ export const SessionInputCard: React.FC<SessionInputCardProps> = ({
             <p className="mt-1.5 text-xs text-stone-500">Tối thiểu 4 cầu thủ, tối đa 50 (ví dụ: 16)</p>
           </div>
 
-          {/* 2. Nội dung tập luyện */}
-          <div className="lg:col-span-8">
+          {/* 2. Loại hình thi đấu */}
+          <div className="sm:col-span-1 lg:col-span-8">
+            <label
+              className="block text-xs font-bold uppercase tracking-wider text-stone-700 flex items-center gap-1"
+            >
+              <Shield className="h-3.5 w-3.5 text-stone-400" />
+              2. Loại hình thi đấu
+            </label>
+            <div className="mt-2 inline-flex w-full rounded-lg border border-stone-200 bg-stone-100 p-0.5" role="group">
+              {GAME_FORMAT_OPTIONS.map((fmt) => {
+                const isSelected = gameFormat === fmt;
+                return (
+                  <button
+                    key={fmt}
+                    type="button"
+                    disabled={isGenerating}
+                    onClick={() => {
+                      setGameFormat(fmt);
+                      if (onClearError) onClearError();
+                    }}
+                    className={`flex-1 rounded-md py-2.5 px-2 text-center text-xs font-bold transition-all disabled:opacity-50 ${
+                      isSelected
+                        ? 'bg-white text-stone-900 shadow-xs'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                  >
+                    {fmt}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-1.5 text-xs text-stone-500">Mặc định: 7v7</p>
+          </div>
+
+          {/* 3. Nội dung tập luyện */}
+          <div className="sm:col-span-2 lg:col-span-12">
             <label
               htmlFor="topic-input"
               className="block text-xs font-bold uppercase tracking-wider text-stone-700"
             >
-              2. Nội dung tập luyện <span className="text-red-500">*</span>
+              3. Nội dung tập luyện <span className="text-red-500">*</span>
             </label>
             <div className="mt-2 relative">
               <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-stone-400">
@@ -178,12 +223,12 @@ export const SessionInputCard: React.FC<SessionInputCardProps> = ({
           </div>
         </div>
 
-        {/* 3. Thời lượng buổi tập & Nút tạo giáo án */}
+        {/* 4. Thời lượng buổi tập & Nút tạo giáo án */}
         <div className="flex flex-col gap-4 pt-3 sm:flex-row sm:items-center sm:justify-between border-t border-stone-100">
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-bold uppercase tracking-wider text-stone-700 flex items-center gap-1">
               <Clock className="h-3.5 w-3.5 text-stone-400" />
-              3. Thời lượng buổi tập:
+              4. Thời lượng buổi tập:
             </span>
             <div className="inline-flex rounded-lg border border-stone-200 bg-stone-100 p-0.5" role="group">
               {([60, 75, 90] as SessionDuration[]).map((d) => {

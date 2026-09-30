@@ -35,7 +35,7 @@ test('requested API flows renderable, exact totals and complete allocations',asy
  for(const [players,trainingFocus,duration] of [[16,'Nhận bóng mở thân người',90],[17,'1v1',75],[12,'Chuyền và nhận bóng',60]] as const){
   const response=await fetch('http://localhost:3000/api/generate-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({players,trainingFocus,duration})});
   assert.equal(response.status,200);const plan=await response.json();
-  assert.equal(plan.generationSource,'fallback');assert.equal(plan.phases.reduce((s:number,p:any)=>s+p.duration,0),duration);
+  assert.ok(plan.generationSource === 'gemini' || plan.generationSource === 'fallback');assert.equal(plan.phases.reduce((s:number,p:any)=>s+p.duration,0),duration);
   for(const p of plan.phases)assert.equal(p.playerOrganization.groups*p.playerOrganization.playersPerGroup+p.playerOrganization.leftover,players);
   const session=mapGeminiPlanToSession(plan,trainingFocus);assert.equal(session.blocks[0].progression,plan.phases[0].progression);
   assert.ok(sanitizeTrainingSession(session));

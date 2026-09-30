@@ -7,6 +7,7 @@ import { GeminiTrainingPlan, TrainingPhase } from '../types/trainingPlan';
 import {
   BlockType,
   Exercise,
+  GameFormat,
   SessionDuration,
   TrainingSession,
 } from '../types/session';
@@ -50,17 +51,71 @@ function buildLocalFallbackPlan(params: {
   players: number;
   trainingFocus: string;
   duration: number;
+  gameFormat?: GameFormat;
 }): GeminiTrainingPlan {
   const durations = durationSplit(params.duration);
   const topic = params.trainingFocus.trim();
   const blockTypes: BlockType[] = ['warm_up', 'technical', 'skill', 'small_sided', 'match'];
   const phaseNames = ['Khởi động', 'Kỹ thuật', 'Phát triển kỹ năng', 'Tình huống đối kháng', 'Thi đấu'];
 
+  const format = params.gameFormat || '7v7';
+  let defaultAreas: [string, string, string, string, string];
+  let finalGameName: string;
+  const perSide = Math.floor(params.players / 2);
+  const remainder = params.players % 2;
+
+  if (format === 'Futsal 5v5') {
+    defaultAreas = [
+      '18 × 15 m (Không gian hẹp Futsal)',
+      '16 × 14 m (Khu vực kỹ thuật cô đọng)',
+      '22 × 16 m (Định hướng cự ly ngắn)',
+      '28 × 18 m (Đối kháng sân nhỏ Futsal)',
+      '38 × 20 m (Sân Futsal tiêu chuẩn)',
+    ];
+    finalGameName = remainder === 0
+      ? (params.players === 10 ? 'Trận đấu Futsal 5v5 tiêu chuẩn' : `Thi đấu Futsal ${perSide}v${perSide}`)
+      : `Thi đấu Futsal ${perSide}v${perSide} (+1 Joker tự do)`;
+  } else if (format === '9v9') {
+    defaultAreas = [
+      '28 × 25 m (Khu vực mở rộng cự ly 9v9)',
+      '32 × 28 m (Tổ hợp phối hợp trung bình)',
+      '42 × 32 m (Liên kết chuyển hướng rộng)',
+      '48 × 36 m (Đối kháng mở rộng biên)',
+      '68 × 48 m (Sân 9 người tiêu chuẩn)',
+    ];
+    finalGameName = remainder === 0
+      ? (params.players === 18 ? 'Trận đấu 9v9 hoàn chỉnh toàn sân' : `Trận đấu 9v9 thu nhỏ: ${perSide}v${perSide}`)
+      : `Trận đấu 9v9: ${perSide}v${perSide} (+1 Joker tự do)`;
+  } else if (format === '11v11') {
+    defaultAreas = [
+      '30 × 30 m (Khu vực cự ly mở rộng 11v11)',
+      '35 × 30 m (Chia nhiều trạm kỹ thuật song song)',
+      '48 × 40 m (Liên kết cự ly giữa các tuyến)',
+      '55 × 45 m (Đối kháng không gian lớn)',
+      '65 × 50 m (Nửa sân 11 người tiêu chuẩn)',
+    ];
+    finalGameName = remainder === 0
+      ? (params.players >= 22 ? 'Trận đấu 11v11 hoàn chỉnh toàn sân' : `Thi đấu thể thức đại diện 11v11: ${perSide}v${perSide}`)
+      : `Thi đấu thể thức đại diện 11v11: ${perSide}v${perSide} (+1 Joker)`;
+  } else {
+    defaultAreas = [
+      '25 × 20 m (Khu vực sân 7)',
+      '22 × 20 m (Tổ hợp cự ly ngắn-trung bình)',
+      '35 × 25 m (Chia khu vực chuyển đổi)',
+      '40 × 30 m (4 cầu môn nhỏ ở 4 góc)',
+      '55 × 35 m (Sân 7 người tiêu chuẩn)',
+    ];
+    finalGameName = remainder === 0
+      ? (params.players === 14 ? 'Trận đấu 7v7 hoàn chỉnh trên sân 7' : `Trận đấu đối kháng sân 7: ${perSide}v${perSide}`)
+      : `Trận đấu đối kháng sân 7: ${perSide}v${perSide} (+1 Joker tự do)`;
+  }
+
   return {
     sessionTitle: `Chuyên đề: ${topic}`,
     mainObjective: `Phát triển kỹ năng ${topic} cho ${params.players} cầu thủ trong buổi tập ${params.duration} phút.`,
     players: params.players,
     duration: params.duration,
+    gameFormat: format,
     ageGroup: 'Bóng đá cộng đồng / Phong trào',
     sessionOverview: `Buổi tập ${params.duration} phút gồm 5 giai đoạn liên hoàn chuẩn đào tạo, đảm bảo tất cả cầu thủ đều được vận động liên tục.`,
     generationSource: 'fallback',
@@ -79,10 +134,10 @@ function buildLocalFallbackPlan(params: {
                 ? `Bài tập có định hướng đối kháng: ${topic}`
                 : idx === 3
                   ? `Đối kháng nhóm nhỏ ghi điểm cầu môn mini`
-                  : `Trận đấu tự do thực chiến có áp dụng ${topic}`,
+                  : finalGameName,
         duration: durations[idx],
         players: params.players,
-        area: ['25 × 20 m', '20 × 20 m', '35 × 25 m', '40 × 30 m', 'Sân 7 người tiêu chuẩn'][idx],
+        area: defaultAreas[idx],
         equipment: ['Bóng', 'Cọc tiêu', 'Áo bib'],
         organization: `${formatPlayerDistribution(params.players, blockType)}. Bóng luân chuyển liên tục, hạn chế đứng chờ.`,
         execution: `Cầu thủ thực hiện các bài tập ${phase.toLowerCase()} kết hợp chủ đề ${topic}.`,
@@ -105,6 +160,7 @@ export async function generateTrainingPlanWithGemini(params: {
   players: number;
   trainingFocus: string;
   duration: number;
+  gameFormat?: GameFormat;
 }): Promise<GeminiTrainingPlan> {
   const validationError = validatePlanInput(
     params.players,
@@ -129,6 +185,7 @@ export async function generateTrainingPlanWithGemini(params: {
         players: params.players,
         trainingFocus: params.trainingFocus.trim(),
         duration: params.duration,
+        gameFormat: params.gameFormat || '7v7',
       }),
     });
 
@@ -138,6 +195,7 @@ export async function generateTrainingPlanWithGemini(params: {
         topic: params.trainingFocus.trim(),
         players: params.players,
         duration: params.duration as SessionDuration,
+        gameFormat: params.gameFormat || '7v7',
       });
       if (sanitized) {
         const source =
@@ -257,12 +315,14 @@ function formatPlayersCount(phase: TrainingPhase, blockType: BlockType): string 
  */
 export function mapGeminiPlanToSession(
   plan: GeminiTrainingPlan,
-  topic: string
+  topic: string,
+  gameFormat?: GameFormat
 ): TrainingSession {
   const sanitized = sanitizeGeminiPlan(plan, {
     topic,
     players: plan.players,
     duration: plan.duration as SessionDuration,
+    gameFormat: gameFormat || plan.gameFormat || '7v7',
   });
   if (!sanitized) throw new Error('Giáo án không hợp lệ.');
   const safePlan = sanitized;
@@ -310,6 +370,7 @@ export function mapGeminiPlanToSession(
     playerCount: safePlan.players,
     totalDuration: safePlan.duration,
     selectedDuration: safePlan.duration as SessionDuration,
+    gameFormat: safePlan.gameFormat || gameFormat || plan.gameFormat || '7v7',
     createdAt: new Date().toLocaleDateString('vi-VN', {
       day: '2-digit',
       month: '2-digit',

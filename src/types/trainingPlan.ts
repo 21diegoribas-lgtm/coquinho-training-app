@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { GameFormat } from './session';
+
 export interface PlayerOrganization {
   groups: number;
   playersPerGroup: number;
@@ -39,6 +41,7 @@ export interface GeminiTrainingPlan {
   mainObjective: string;
   players: number;
   duration: number;
+  gameFormat?: GameFormat;
   ageGroup?: string;
   sessionOverview?: string;
   phases: TrainingPhase[];
@@ -49,4 +52,5 @@ export interface GeneratePlanRequest {
   players: number;
   trainingFocus: string;
   duration: number;
+  gameFormat?: GameFormat;
 }

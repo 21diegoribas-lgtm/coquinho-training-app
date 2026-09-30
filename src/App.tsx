@@ -25,7 +25,7 @@ import {
   deleteSavedSession,
 } from './services/storageService';
 import { sumBlockDurations } from './services/durationUtils';
-import { Exercise, SessionDuration, TrainingSession } from './types/session';
+import { Exercise, GameFormat, SessionDuration, TrainingSession } from './types/session';
 import { CheckCircle2 } from 'lucide-react';
 
 export default function App() {
@@ -34,6 +34,7 @@ export default function App() {
   );
   const variationSeed = useRef(0);
   const generating = useRef(false);
+  const [selectedGameFormat, setSelectedGameFormat] = useState<GameFormat>('7v7');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [savedSessions, setSavedSessions] = useState<TrainingSession[]>([]);
@@ -56,20 +57,27 @@ export default function App() {
     }, 3500);
   };
 
-  const handleGenerate = async (topic: string, players: number, duration: SessionDuration) => {
+  const handleGenerate = async (
+    topic: string,
+    players: number,
+    duration: SessionDuration,
+    gameFormat: GameFormat = '7v7'
+  ) => {
     if (generating.current) return;
     generating.current = true;
     setIsGenerating(true);
     setApiError(null);
+    setSelectedGameFormat(gameFormat);
 
     try {
       const plan = await generateTrainingPlanWithGemini({
         players,
         trainingFocus: topic,
         duration,
+        gameFormat,
       });
 
-      const newSession = mapGeminiPlanToSession(plan, topic);
+      const newSession = mapGeminiPlanToSession(plan, topic, gameFormat);
       setCurrentSession(newSession);
       variationSeed.current = 0;
 
@@ -95,7 +103,8 @@ export default function App() {
     handleGenerate(
       currentSession.topic,
       currentSession.playerCount,
-      currentSession.selectedDuration ?? ([60, 75, 90].includes(currentSession.totalDuration) ? currentSession.totalDuration as SessionDuration : 90)
+      currentSession.selectedDuration ?? ([60, 75, 90].includes(currentSession.totalDuration) ? currentSession.totalDuration as SessionDuration : 90),
+      currentSession.gameFormat ?? selectedGameFormat
     );
   };
 
@@ -150,6 +159,9 @@ export default function App() {
 
   const handleLoadSaved = (session: TrainingSession) => {
     setCurrentSession(session);
+    if (session.gameFormat) {
+      setSelectedGameFormat(session.gameFormat);
+    }
     showToast(`Đã tải giáo án: "${session.title}"`);
     if (planRef.current) {
       planRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -193,6 +205,7 @@ export default function App() {
             isGenerating={isGenerating}
             errorMessage={apiError}
             onClearError={() => setApiError(null)}
+            initialGameFormat={currentSession.gameFormat ?? selectedGameFormat}
           />
         </section>
 
