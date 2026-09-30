@@ -16,6 +16,7 @@ import { sanitizeGeminiPlan } from './planValidation';
 import { normalizeDurationsToTotal } from './durationUtils';
 import { buildDrillDiagram } from './drillDiagramService';
 import { formatPhaseContent } from './gameFormatContext';
+import { checkGeneratedSession, finalGameTitle } from './sessionConsistency';
 
 /**
  * Validates inputs prior to calling the Gemini API
@@ -118,13 +119,13 @@ function buildLocalFallbackPlan(params: {
     duration: params.duration,
     gameFormat: format,
     ageGroup: 'Bóng đá cộng đồng / Phong trào',
-    sessionOverview: `Buổi tập ${params.duration} phút gồm 5 giai đoạn liên hoàn chuẩn đào tạo, đảm bảo tất cả cầu thủ đều được vận động liên tục.`,
+    sessionOverview: `Buổi tập ${params.duration} phút gồm ${phaseNames.length} giai đoạn liên hoàn chuẩn đào tạo, đảm bảo tất cả cầu thủ đều được vận động liên tục.`,
     generationSource: 'fallback',
     phases: phaseNames.map((phase, idx) => {
       const blockType = blockTypes[idx];
       const org = toPlayerOrganization(params.players, blockType);
       const { spatialSetup, ...content } = formatPhaseContent(format, blockType, topic, {
-        exerciseName: idx === 4 ? finalGameName : `${phase}: ${topic}`,
+        exerciseName: idx === phaseNames.length - 1 ? finalGameTitle(format, org) : `${phase}: ${topic}`,
         execution: `Cầu thủ thực hiện các bài tập ${phase.toLowerCase()} kết hợp chủ đề ${topic}.`,
         coachingPoints: ['Kiểm tra vai trước khi nhận bóng.', 'Chạm bước một chủ động.'],
         progression: 'Đổi hướng luân chuyển để dùng cả hai chân.',
@@ -353,7 +354,7 @@ export function mapGeminiPlanToSession(
     };
   });
 
-  return {
+  return checkGeneratedSession({
     id: sessionId,
     title: safePlan.sessionTitle || `Giáo án: ${topic}`,
     objective: safePlan.mainObjective || `Phát triển kỹ năng bóng đá chuyên đề ${topic}`,
@@ -369,5 +370,5 @@ export function mapGeminiPlanToSession(
     }),
     blocks,
     generationSource: plan.generationSource ?? safePlan.generationSource,
-  };
+  });
 }

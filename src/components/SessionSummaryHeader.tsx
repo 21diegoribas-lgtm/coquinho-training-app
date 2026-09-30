@@ -43,7 +43,7 @@ Thời lượng: ${accountedDuration} Phút
 MỤC TIÊU BUỔI TẬP:
 ${session.objective}
 
-CẤU TRÚC 5 GIAI ĐOẠN:
+CẤU TRÚC ${session.blocks.length} GIAI ĐOẠN:
 ${session.blocks
   .map(
     (b, i) =>

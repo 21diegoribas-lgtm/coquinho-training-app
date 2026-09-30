@@ -8,6 +8,7 @@ import { normalizeDurationsToTotal } from './src/services/durationUtils.ts';
 import { sanitizeGeminiPlan, validateGeminiPlan } from './src/services/planValidation.ts';
 import { BlockType, GameFormat, SessionDuration } from './src/types/session.ts';
 import { formatPhaseContent, gameFormatTacticalGuidance } from './src/services/gameFormatContext.ts';
+import { finalGameTitle } from './src/services/sessionConsistency.ts';
 
 dotenv.config();
 
@@ -419,6 +420,7 @@ YÊU CẦU BẮT BUỘC ĐỐI VỚI NỘI DUNG TỪNG BÀI TẬP:
 - coachingPoints: 3-4 câu khẩu lệnh chuyên môn ngắn gọn, chỉ rõ tư thế cơ thể, cách quan sát và xử lý bóng (không lặp lại câu chữ giữa các giai đoạn).
 - progression: 1-2 biến thể điều chỉnh độ khó hợp lý (giới hạn chạm, tăng/giảm khoảng cách, bổ sung hậu vệ gây áp lực).
 - Giai đoạn cuối cùng (Thi đấu): Bắt buộc có luật thưởng điểm hoặc điều kiện chiến thuật gắn trực tiếp với chủ đề "${cleanFocus}". TUYỆT ĐỐI KHÔNG để thi đấu tự do thông thường.
+- Kiểm tra tính nhất quán trước khi trả lời: số giai đoạn trong sessionOverview phải bằng phases.length; tổng thời gian các giai đoạn bằng thời lượng buổi tập, không tự chèn nghỉ giữa buổi. Tên bài tập phải khớp thể thức trong organization và playerOrganization. Với bối cảnh 7v7 nhưng thi đấu 8v8, ghi rõ "8v8 đại diện điều chỉnh (bối cảnh 7v7)", không gọi là trận 7v7 tiêu chuẩn. Điều kiện ghi điểm phải quan sát và đếm được (đường chuyền hoàn thành, vị trí nhận hoặc bàn thắng); bàn thắng bình thường vẫn hợp lệ. Không bắt buộc xoay người, mở thân hay chuyền lên bất kể áp lực; cho phép che bóng, nhả lại hoặc đổi hướng khi bị khóa.
 
 Hãy tạo giáo án xuất sắc, chuẩn mực sư phạm và trả về đúng định dạng JSON yêu cầu.`;
 }
@@ -845,7 +847,7 @@ function generateRealisticFootballPlan(
   // Construct final conforming phases
   const phases = phasesData.map((p, idx) => {
     const { spatialSetup, ...content } = formatPhaseContent(gameFormat as GameFormat, blockTypes[idx], cleanTopic, {
-      ...p, exerciseName: idx === 4 ? finalGameExerciseName : p.exerciseName,
+      ...p, exerciseName: idx === phasesData.length - 1 ? finalGameTitle(gameFormat as GameFormat, toPlayerOrganization(players, blockTypes[idx])) : p.exerciseName,
     });
     return {
     id: `phase-${idx + 1}`,
@@ -870,7 +872,7 @@ function generateRealisticFootballPlan(
     duration,
     gameFormat,
     ageGroup: 'Bóng đá cộng đồng / Phong trào',
-    sessionOverview: `Buổi tập ${duration} phút gồm 5 giai đoạn liên hoàn dành cho ${players} cầu thủ, tối ưu hóa thời gian tiếp xúc bóng và hạn chế tối đa đứng chờ.`,
+    sessionOverview: `Buổi tập ${duration} phút gồm ${phases.length} giai đoạn liên hoàn dành cho ${players} cầu thủ, tối ưu hóa thời gian tiếp xúc bóng và hạn chế tối đa đứng chờ.`,
     phases,
   };
 }

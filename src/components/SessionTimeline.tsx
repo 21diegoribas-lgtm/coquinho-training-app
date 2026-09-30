@@ -1,6 +1,6 @@
 import React from 'react';
 import { Clock, CheckCircle2, AlertTriangle } from 'lucide-react';
-import { Exercise, SessionDuration } from '../types/session';
+import { Exercise } from '../types/session';
 
 interface SessionTimelineProps {
   blocks: Exercise[];
@@ -61,7 +61,7 @@ export const SessionTimeline: React.FC<SessionTimelineProps> = ({
             <span>Tiến trình buổi tập ({totalDuration} phút)</span>
           </h3>
           <p className="text-xs text-stone-500 mt-0.5">
-            5 giai đoạn huấn luyện tuần tự đảm bảo đúng cấu trúc giáo án
+            {blocks.length} giai đoạn huấn luyện tuần tự đảm bảo đúng cấu trúc giáo án
           </p>
         </div>
 
@@ -84,7 +84,7 @@ export const SessionTimeline: React.FC<SessionTimelineProps> = ({
       <div className="relative mt-2">
         <div className="flex h-3.5 w-full overflow-hidden rounded-full bg-stone-100 ring-1 ring-stone-200/80">
           {blocksWithTime.map((block) => {
-            const pct = Math.max(5, ((Number(block.duration) || 0) / (currentTotal || totalDuration)) * 100);
+            const pct = ((Number(block.duration) || 0) / (currentTotal || totalDuration)) * 100;
             const style = BLOCK_COLORS[block.blockType];
             const isActive = activeBlockId === block.id;
 
@@ -93,7 +93,7 @@ export const SessionTimeline: React.FC<SessionTimelineProps> = ({
                 key={block.id}
                 type="button"
                 onClick={() => onSelectBlock && onSelectBlock(block.id)}
-                title={`${style.name}: ${block.duration} phút (${block.startMinute}' - ${block.endMinute}')`}
+                title={`${block.blockName}: ${block.duration} phút (${block.startMinute}' - ${block.endMinute}')`}
                 style={{ width: `${pct}%` }}
                 className={`h-full transition-opacity hover:opacity-85 ${style.barColor} ${
                   isActive ? 'ring-2 ring-stone-900 ring-offset-1 z-10' : ''
@@ -106,12 +106,14 @@ export const SessionTimeline: React.FC<SessionTimelineProps> = ({
         {/* Các mốc thời gian */}
         <div className="mt-1.5 flex justify-between font-mono text-[11px] text-stone-400 tabular-nums">
           <span>0&apos; (Bắt đầu)</span>
-          <span>{Math.round(totalDuration / 2)}&apos; (Nghỉ giữa buổi)</span>
-          <span>{totalDuration}&apos; (Thả lỏng)</span>
+          {blocksWithTime.filter(block => /nghỉ|\brest\b|half[ -]?time/i.test(block.blockName)).map(block => (
+            <span key={block.id}>{block.startMinute}&apos; ({block.blockName})</span>
+          ))}
+          <span>{currentTotal}&apos; (Kết thúc)</span>
         </div>
       </div>
 
-      {/* Thẻ tóm tắt 5 giai đoạn */}
+      {/* Thẻ tóm tắt các giai đoạn thực tế */}
       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
         {blocksWithTime.map((block, idx) => {
           const style = BLOCK_COLORS[block.blockType];
@@ -133,7 +135,7 @@ export const SessionTimeline: React.FC<SessionTimelineProps> = ({
                 <span>{block.startMinute}&apos;–{block.endMinute}&apos;</span>
               </div>
               <div className="mt-1 text-xs font-bold text-stone-900 line-clamp-1">
-                {style.name}
+                {block.blockName}
               </div>
               <div className="mt-0.5 font-mono text-[11px] font-semibold text-[#164336] tabular-nums">
                 {block.duration} phút

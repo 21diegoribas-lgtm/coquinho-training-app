@@ -2,6 +2,7 @@ import { explicitOrganization, organizationMatchesStructure, validPlayerOrganiza
 import { GeminiTrainingPlan, TrainingPhase } from '../types/trainingPlan';
 import { Exercise, GameFormat, SessionDuration, TrainingSession } from '../types/session';
 import { isSessionDuration, normalizeDurationsToTotal } from './durationUtils';
+import { validatePlanConsistency } from './sessionConsistency';
 
 export const GENERIC_PROGRESSION =
   'Điều chỉnh độ khó: giới hạn số lần chạm bóng (1-2 chạm), thu hẹp hoặc mở rộng diện tích sân, hoặc bổ sung cầu thủ phòng ngự áp sát để tăng tính thực chiến.';
@@ -101,6 +102,7 @@ export function sanitizeGeminiPlan(
   const phasesRaw = Array.isArray(raw.phases) ? raw.phases : [];
   if (!validateGeminiPlan(plan).ok) return null;
   if (phasesRaw.some(ph => ph.players !== fallbacks.players)) return null;
+  if (fallbacks.gameFormat && raw.gameFormat && raw.gameFormat !== fallbacks.gameFormat) return null;
 
   const usedIds = new Set<string>();
   const phases: TrainingPhase[] = phasesRaw.map((phase, idx) => {
@@ -139,7 +141,7 @@ export function sanitizeGeminiPlan(
     ? (raw.gameFormat as GameFormat)
     : (fallbacks.gameFormat || '7v7');
 
-  return {
+  const sanitized: GeminiTrainingPlan = {
     sessionTitle,
     mainObjective: asNonEmptyString(raw.mainObjective, `Phát triển kỹ năng ${fallbacks.topic}`),
     players,
@@ -152,6 +154,7 @@ export function sanitizeGeminiPlan(
       ? raw.generationSource
       : undefined,
   };
+  return validatePlanConsistency(sanitized).length ? null : sanitized;
 }
 
 export function sanitizeTrainingSession(session: unknown): TrainingSession | null {

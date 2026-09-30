@@ -2,6 +2,7 @@ import { Exercise, GameFormat, SessionDuration, TrainingSession, PitchDiagramDat
 import { explicitOrganization, formatPlayerDistribution, toPlayerOrganization } from './playerAccounting';
 import { buildDrillDiagram } from './drillDiagramService';
 import { formatPhaseContent } from './gameFormatContext';
+import { checkGeneratedSession, finalGameTitle, titleMatchesOrganization } from './sessionConsistency';
 
 function withFormatContext(exercise: Exercise, topic: string, gameFormat: GameFormat, players: number): Exercise {
   const { spatialSetup, execution, ...content } = formatPhaseContent(gameFormat, exercise.blockType, topic, {
@@ -10,8 +11,10 @@ function withFormatContext(exercise: Exercise, topic: string, gameFormat: GameFo
   return {
     ...exercise,
     ...content,
-    // Keep the variation selected by the local generator.
-    exerciseName: exercise.exerciseName,
+    exerciseName: exercise.blockType === 'match'
+      ? finalGameTitle(gameFormat, exercise.playerOrganization!)
+      : titleMatchesOrganization(exercise.exerciseName, formatPlayerDistribution(players, exercise.blockType), exercise.playerOrganization!)
+        ? exercise.exerciseName : content.exerciseName.replace(/\b\d+\s*v\s*\d+(?:\s*\(?\s*\+\s*\d+\s*(?:jokers?|neutrals?)[^)]*\)?)?/gi, '').trim(),
     organization: `${formatPlayerDistribution(players, exercise.blockType)}. ${spatialSetup}`,
     howItWorks: execution.split('\n'),
   };
@@ -1015,7 +1018,7 @@ export function generateTrainingSession(
       }),
     }));
 
-    return {
+    return checkGeneratedSession({
       id: sessionId,
       title: matchedPreset.title,
       objective: matchedPreset.objective,
@@ -1030,7 +1033,7 @@ export function generateTrainingSession(
         year: 'numeric',
       }),
       blocks: diagramBlocks.map(exercise => withFormatContext(exercise, cleanTopic, gameFormat, playerCount)),
-    };
+    });
   }
 
   // Nếu là chủ đề tự nhập, tự động thiết lập giáo án bóng đá chuẩn 5 giai đoạn bằng tiếng Việt
@@ -1174,7 +1177,7 @@ export function generateTrainingSession(
     }),
   }));
 
-  return {
+  return checkGeneratedSession({
     id: sessionId,
     title: customTitle,
     objective: customObjective,
@@ -1189,7 +1192,7 @@ export function generateTrainingSession(
       year: 'numeric',
     }),
     blocks: diagramBlocks.map(exercise => withFormatContext(exercise, cleanTopic, gameFormat, playerCount)),
-  };
+  });
 }
 
 // Hàm đổi biến thể cho 1 bài tập đơn lẻ
