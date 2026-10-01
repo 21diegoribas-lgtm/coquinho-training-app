@@ -246,7 +246,7 @@ export default function App() {
                   Các khối bài tập huấn luyện
                 </h2>
                 <p className="text-xs text-stone-500">
-                  Trình tự các giai đoạn: từ khởi động đến trận đấu tự do
+                  Trình tự các giai đoạn: từ khởi động đến tình huống thi đấu cuối buổi
                 </p>
               </div>
               <span className="font-mono text-xs font-semibold text-[#164336] bg-[#164336]/10 px-2.5 py-1 rounded">

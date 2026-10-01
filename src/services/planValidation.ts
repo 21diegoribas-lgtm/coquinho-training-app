@@ -2,7 +2,7 @@ import { explicitOrganization, organizationMatchesStructure, validPlayerOrganiza
 import { GeminiTrainingPlan, TrainingPhase } from '../types/trainingPlan';
 import { Exercise, GameFormat, SessionDuration, TrainingSession } from '../types/session';
 import { isSessionDuration, normalizeDurationsToTotal } from './durationUtils';
-import { validatePlanConsistency } from './sessionConsistency';
+import { validatePlanConsistency, validateTrainingSessionConsistency } from './sessionConsistency';
 
 export const GENERIC_PROGRESSION =
   'Điều chỉnh độ khó: giới hạn số lần chạm bóng (1-2 chạm), thu hẹp hoặc mở rộng diện tích sân, hoặc bổ sung cầu thủ phòng ngự áp sát để tăng tính thực chiến.';
@@ -215,7 +215,7 @@ export function sanitizeTrainingSession(session: unknown): TrainingSession | nul
 
   const normalizedBlocks = blocks;
 
-  return {
+  const sanitized: TrainingSession = {
     id: asNonEmptyString(raw.id, `session_${Date.now()}`),
     title,
     objective: asNonEmptyString(raw.objective, title),
@@ -233,6 +233,7 @@ export function sanitizeTrainingSession(session: unknown): TrainingSession | nul
         ? raw.generationSource
         : undefined,
   };
+  return validateTrainingSessionConsistency(sanitized).length ? null : sanitized;
 }
 
 export function isUsableTrainingSession(session: TrainingSession | null): session is TrainingSession {

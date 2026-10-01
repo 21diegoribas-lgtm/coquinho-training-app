@@ -89,7 +89,7 @@ export const SessionInputCard: React.FC<SessionInputCardProps> = ({
           Tạo giáo án buổi tập
         </h2>
         <p className="mt-1 text-sm text-stone-500">
-          Nhập số lượng cầu thủ và nội dung tập luyện để tự động tạo giáo án hoàn chỉnh 5 giai đoạn chuẩn đào tạo bóng đá.
+          Nhập số lượng cầu thủ và nội dung tập luyện để tự động tạo giáo án theo tiến trình phù hợp với mục tiêu buổi tập.
         </p>
       </div>
 
