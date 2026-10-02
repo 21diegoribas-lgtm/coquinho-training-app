@@ -9,6 +9,7 @@ import { sanitizeGeminiPlan, validateGeminiPlan } from './src/services/planValid
 import { BlockType, GameFormat, SessionDuration } from './src/types/session.ts';
 import { formatPhaseContent, gameFormatTacticalGuidance } from './src/services/gameFormatContext.ts';
 import { finalGameTitle } from './src/services/sessionConsistency.ts';
+import { buildDefaultStructuredDiagram } from './src/services/structuredDiagram.ts';
 
 dotenv.config();
 
@@ -63,7 +64,7 @@ function logGeminiError(model: string, err: unknown) {
   );
 }
 
-const TRAINING_PLAN_SCHEMA = {
+export const TRAINING_PLAN_SCHEMA = {
   type: Type.OBJECT,
   properties: {
     sessionTitle: {
@@ -173,6 +174,115 @@ const TRAINING_PLAN_SCHEMA = {
             },
             required: ['groups', 'playersPerGroup', 'leftover', 'leftoverRole'],
           },
+          diagram: {
+            type: Type.OBJECT,
+            description: 'Dữ liệu sơ đồ bài tập logic có cấu trúc tĩnh (tọa độ phần trăm 0-100)',
+            properties: {
+              pitch: {
+                type: Type.OBJECT,
+                properties: {
+                  width: { type: Type.INTEGER, description: '100' },
+                  height: { type: Type.INTEGER, description: '60' },
+                },
+                required: ['width', 'height'],
+              },
+              players: {
+                type: Type.ARRAY,
+                description: 'Danh sách cầu thủ trong sơ đồ bài tập (tọa độ x, y từ 0 đến 100)',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING, description: 'ID duy nhất: p1, p2,...' },
+                    team: {
+                      type: Type.STRING,
+                      enum: ['blue', 'red', 'neutral', 'goalkeeper'],
+                      description: 'blue, red, neutral, hoặc goalkeeper',
+                    },
+                    role: { type: Type.STRING, description: 'attacker, defender, passer, joker, goalkeeper,...' },
+                    x: { type: Type.NUMBER, description: 'Tọa độ X từ 0 đến 100' },
+                    y: { type: Type.NUMBER, description: 'Tọa độ Y từ 0 đến 100' },
+                  },
+                  required: ['id', 'team', 'x', 'y'],
+                },
+              },
+              balls: {
+                type: Type.ARRAY,
+                description: 'Danh sách bóng trên sân',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING, description: 'b1, b2,...' },
+                    x: { type: Type.NUMBER, description: 'Tọa độ X từ 0 đến 100' },
+                    y: { type: Type.NUMBER, description: 'Tọa độ Y từ 0 đến 100' },
+                  },
+                  required: ['id', 'x', 'y'],
+                },
+              },
+              cones: {
+                type: Type.ARRAY,
+                description: 'Danh sách cọc tiêu hoặc nón',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING, description: 'c1, c2,...' },
+                    x: { type: Type.NUMBER, description: 'Tọa độ X từ 0 đến 100' },
+                    y: { type: Type.NUMBER, description: 'Tọa độ Y từ 0 đến 100' },
+                  },
+                  required: ['id', 'x', 'y'],
+                },
+              },
+              goals: {
+                type: Type.ARRAY,
+                description: 'Danh sách khung thành',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING, description: 'g1, g2,...' },
+                    type: { type: Type.STRING, description: 'mini hoặc standard' },
+                    x: { type: Type.NUMBER, description: 'Tọa độ X từ 0 đến 100' },
+                    y: { type: Type.NUMBER, description: 'Tọa độ Y từ 0 đến 100' },
+                    orientation: { type: Type.STRING, description: 'left, right, top, bottom' },
+                  },
+                  required: ['id', 'type', 'x', 'y', 'orientation'],
+                },
+              },
+              zones: {
+                type: Type.ARRAY,
+                description: 'Khu vực / ô chia sân (nếu có, để trống [] nếu không)',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    x: { type: Type.NUMBER },
+                    y: { type: Type.NUMBER },
+                    width: { type: Type.NUMBER },
+                    height: { type: Type.NUMBER },
+                    label: { type: Type.STRING },
+                  },
+                  required: ['id', 'x', 'y', 'width', 'height'],
+                },
+              },
+              paths: {
+                type: Type.ARRAY,
+                description: 'Đường chuyền, di chuyển hoặc rê bóng',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING, description: 'path1, path2,...' },
+                    type: {
+                      type: Type.STRING,
+                      enum: ['pass', 'movement', 'dribble'],
+                      description: 'pass, movement, hoặc dribble',
+                    },
+                    fromPlayerId: { type: Type.STRING, description: 'ID cầu thủ xuất phát' },
+                    toPlayerId: { type: Type.STRING, description: 'ID cầu thủ đích' },
+                  },
+                  required: ['id', 'type', 'fromPlayerId'],
+                },
+              },
+            },
+            required: ['pitch', 'players', 'balls', 'cones', 'goals', 'zones', 'paths'],
+          },
         },
         required: [
           'id',
@@ -186,6 +296,7 @@ const TRAINING_PLAN_SCHEMA = {
           'playerOrganization',
           'execution',
           'coachingPoints',
+          'diagram',
         ],
       },
     },
@@ -200,18 +311,18 @@ const TRAINING_PLAN_SCHEMA = {
   ],
 };
 
-const SYSTEM_INSTRUCTION = `Bạn là Giám đốc kỹ thuật & Chuyên gia đào tạo HLV bóng đá cộng đồng/phong trào chuyên nghiệp.
+export const SYSTEM_INSTRUCTION = `Bạn là Giám đốc kỹ thuật & Chuyên gia đào tạo HLV bóng đá cộng đồng/phong trào chuyên nghiệp.
 Nhiệm vụ của bạn là xây dựng giáo án huấn luyện bóng đá chi tiết, có tính sư phạm và giá trị thực chiến cao, tập trung tuyệt đối vào mục tiêu chuyên môn cụ thể của buổi tập.
 
 NGUYÊN TẮC HUẤN LUYỆN CỐT LÕI (CORE COACHING PRINCIPLES):
 1. MỤC TIÊU XUYÊN SUỐT: Mọi bài tập từ khởi động đến trận đấu kết thúc đều phải xoay quanh và lặp đi lặp lại hành vi kỹ-chiến thuật của chủ đề, không được biến thành bài tập chung chung.
 2. TẦN SUẤT TIẾP XÚC BÓNG CAO (HIGH REPETITIONS): Tối đa hóa số lần chạm bóng và ra quyết định của từng cá nhân. Tuyệt đối tránh để cầu thủ đứng xếp hàng chờ đợi lâu.
-3. TIẾN TRÌNH HUẤN LUYỆN LOGIC (PROGRESSION):
-   - Giai đoạn 1 (Khởi động / Kích hoạt): Nhận thức không gian, làm quen cảm giác bóng, thói quen quan sát và tư thế cơ thể cơ bản với áp lực thấp.
-   - Giai đoạn 2 (Kỹ thuật chuyên biệt): Chia nhiều nhóm nhỏ/trạm song song để tăng số lần lặp lại; nhận bóng từ nhiều góc độ khác nhau; nhấn mạnh tư thế thân người và chạm bước một.
-   - Giai đoạn 3 (Kỹ năng có đối kháng): Tình huống đối kháng thực tế có định hướng (ví dụ: 2v1, 3v2, 3v1, nhận bóng giữa các tuyến/between the lines).
-   - Giai đoạn 4 (Trò chơi đối kháng nhỏ - Small-sided game): Sân thu nhỏ có thưởng điểm cụ thể khi cầu thủ thực hiện thành công hành vi mục tiêu.
-   - Giai đoạn 5 (Trận đấu thực chiến có điều kiện): Trận đấu có luật tính điểm hoặc ràng buộc chiến thuật để kiểm tra xem hành vi mục tiêu có xuất hiện trong thi đấu thực tế không (TUYỆT ĐỐI TRÁNH "thi đấu tự do" vô điều kiện).
+3. TIẾN TRÌNH HUẤN LUYỆN 5 GIAI ĐOẠN RÕ RÀNG (5-PHASE DIFFERENTIATION):
+   - Giai đoạn 1 (Khởi động / Warm-up): scanning (quan sát/kiểm tra vai), body orientation (tư thế thân người mở góc), ball contact (tiếp xúc bóng êm, khống chế bóng cơ bản).
+   - Giai đoạn 2 (Kỹ thuật / Technical): receiving mechanics (cơ chế đón bóng bằng chân xa, xoay hông/ngực về hướng mở) và first touch (chạm bước một định hướng vào khoảng trống, không hãm chết bóng).
+   - Giai đoạn 3 (Kỹ năng có đối kháng / Skill opposed): perception (nhận diện vị trí và khoảng cách áp sát của hậu vệ đối phương sau lưng), pressure (cảm nhận áp lực và bóng che), decision-making (ra quyết định: xoay người tịnh tiến nếu thoáng, nhả về điểm tựa 1 chạm hoặc che bóng nếu bị áp sát).
+   - Giai đoạn 4 (Trò chơi đối kháng nhỏ / Conditioned game): tactical application (vận dụng chiến thuật: tổ chức cự ly, khai thác chiều rộng/chiều sâu, chuyển hướng tấn công, chuyển trạng thái khi đoạt/mất bóng). Có luật điều kiện/khung thành nhỏ/hành lang riêng biệt.
+   - Giai đoạn 5 (Trận đấu thực chiến / Final match): minimal intervention (HLV can thiệp tối thiểu), transfer into realistic play (chuyển hóa thực tế). Bàn thắng bình thường luôn tính 1 điểm hợp lệ; CHỈ ÁP DỤNG DUY NHẤT 1 LUẬT THƯỞNG ĐIỂM ĐƠN GIẢN gắn với mục tiêu; không gò bó quyết định của cầu thủ.
 4. QUY TẮC LOẠI HÌNH THI ĐẤU (GAME FORMAT INFLUENCE):
    - Kích thước sân tập (Drill dimensions): Phải tương thích với bối cảnh loại hình thi đấu:
      + Futsal 5v5: Không gian cô đọng, hẹp (Khởi động 15-20 × 12-15 m; Kỹ thuật 15-18 × 12-15 m; Kỹ năng 20-25 × 15-18 m; Trò chơi nhỏ 25-30 × 18-20 m; Thi đấu: Sân Futsal 38-40 × 18-20 m). Tránh hoàn toàn kích thước sân cỏ lớn.
@@ -230,11 +341,38 @@ NGUYÊN TẮC HUẤN LUYỆN CỐT LÕI (CORE COACHING PRINCIPLES):
 6. PHÂN BỔ QUÂN SỐ VÀ CẤU TRÚC NHÓM:
    - Ưu tiên nhóm nhỏ (3-4 người) hoặc chia 2-3 sân mini song song trong các giai đoạn kỹ thuật & đối kháng kỹ năng để không ai phải đứng ngoài.
    - Nếu số lượng cầu thủ không chia đều, bố trí cầu thủ làm Joker (tự do) tham gia cùng đội kiểm soát bóng hoặc quy định xoay tua nhanh theo lượt chuyền.
-7. ĐIỂM HUẤN LUYỆN (COACHING POINTS):
-   - Phải nêu rõ hành vi cụ thể của cầu thủ (Perception -> Decision -> Action: Cầu thủ quan sát gì? Ra quyết định gì? Thực hiện động tác ra sao?).
-   - Không lặp lại nguyên văn một câu chữ qua các giai đoạn; mỗi giai đoạn phải phản ánh độ khó và áp lực tương ứng.
-8. NGÔN NGỮ: Sử dụng thuật ngữ bóng đá tiếng Việt tự nhiên, trực quan, dễ hiểu bên đường pitch (ví dụ: "kiểm tra vai", "mở thân người góc 45 độ", "chân xa", "chạm bước một định hướng", "chuyền xuyên tuyến").
-9. ĐỊNH DẠNG: Trả về duy nhất dữ liệu JSON hợp lệ theo schema yêu cầu, không thêm bất kỳ văn bản giải thích nào khác.`;
+7. ĐIỂM HUẤN LUYỆN (COACHING POINTS) PHẢI ĐẶC THÙ CHO TỪNG GIAI ĐOẠN:
+   - Khởi động: scanning, body orientation, ball contact.
+   - Kỹ thuật: receiving mechanics và first touch.
+   - Kỹ năng có đối kháng: perception, pressure, decision-making.
+   - Trò chơi đối kháng: tactical application.
+   - Trận đấu thực chiến: minimal intervention, transfer into realistic play.
+   - TUYỆT ĐỐI KHÔNG LẶP LẠI: Cấm lặp lại nguyên văn một câu khẩu lệnh hay coaching point giữa các giai đoạn!
+8. BIẾN THỂ PHÁT TRIỂN (PROGRESSION) PHẢI RIÊNG BIỆT CHO TỪNG BÀI TẬP:
+   - Tuyệt đối không tái sử dụng cùng một câu progression cho nhiều giai đoạn. Mỗi bài tập phải có progression độc nhất phù hợp độ khó của nó.
+9. LUẬT CỦA TRÒ CHƠI ĐỐI KHÁNG VÀ TRẬN ĐẤU THỰC CHIẾN TUYỆT ĐỐI KHÔNG ĐƯỢC GIỐNG NHAU:
+   - Trò chơi đối kháng (Phase 4): Có cấu trúc trò chơi riêng biệt (4 cầu môn nhỏ, chia 3 hành lang biên-trung tâm, luật thưởng điểm chiến thuật).
+   - Trận đấu thực chiến (Phase 5): Sân 2 khung thành có thủ môn, luật bóng đá chuẩn, bàn thắng bình thường tính 1 điểm, chỉ đúng 1 điểm thưởng đơn giản, cầu thủ tự do quyết định, HLV can thiệp tối thiểu.
+10. DỤNG CỤ (EQUIPMENT) PHẢI KHỚP VỚI BÀI TẬP:
+   - Nếu bài tập hoặc trận đấu có sử dụng khung thành (khung thành mini, khung thành sân 7, sân 9, sân 11...), KHUNG THÀNH BẮT BUỘC PHẢI CÓ trong danh sách equipment của giai đoạn đó.
+11. DỮ LIỆU SƠ ĐỒ CHIẾN THUẬT (STRUCTURED DIAGRAM) - ĐỒNG BỘ NGỮ NGHĨA VỚI BÀI TẬP:
+   - Sơ đồ 'diagram' BẮT BUỘC phản ánh chính xác cấu trúc thực tế của từng bài tập, KHÔNG dùng sơ đồ chung chung:
+   - ĐỒNG BỘ PHÂN NHÓM (GROUPING): Cấu trúc nhóm cầu thủ trên sơ đồ phải khớp với organization:
+     + 8 nhóm 2 người: BẮT BUỘC thể hiện 8 cặp riêng biệt trên sân (TUYỆT ĐỐI KHÔNG vẽ thành 4 nhóm 4).
+     + 4 nhóm 4 người: BẮT BUỘC bố trí 4 trạm/nhóm 4 người riêng biệt.
+     + Trận đấu 8v8 (hoặc trận cuối): BẮT BUỘC hiển thị đúng 16 cầu thủ chia 2 đội rõ rệt kèm 2 thủ môn.
+   - ĐỒNG BỘ TÍNH CHẤT ĐỐI KHÁNG (TEAMS / OPPOSITION):
+     + Bài tập không đối kháng (khởi động chuyền đôi, kỹ thuật không hậu vệ): TOÀN BỘ cầu thủ thuộc team 'blue', TUYỆT ĐỐI KHÔNG tự tạo hậu vệ 'red'.
+     + Bài tập có đối kháng (kỹ năng, trò chơi nhỏ, trận đấu): phân chia rõ ràng hai đội 'blue' và 'red' (+ 'neutral' nếu có Joker, 'goalkeeper' cho thủ môn).
+   - ĐỒNG BỘ DỤNG CỤ VÀ KHUNG THÀNH (EQUIPMENT & GOALS):
+     + NẾU EQUIPMENT KHÔNG CÓ KHUNG THÀNH: goals BẮT BUỘC PHẢI LÀ [] (TUYỆT ĐỐI KHÔNG tự bịa khung thành mini nếu bài tập không sử dụng).
+     + Nếu equipment có 4 cầu môn nhỏ / mini: goals phải có đúng 4 khung thành type 'mini'.
+     + Nếu bài tập là trận đấu có 2 khung thành: goals phải có đúng 2 khung thành type 'standard'.
+   - KHU VỰC CHIẾN THUẬT (ZONES): CHỈ vẽ các hành lang/khu vực (zones) khi bài tập hoặc trò chơi thực sự mô tả chia làn (ví dụ: 3 hành lang biên - trung tâm). Các bài tập thông thường để zones: [].
+   - ĐƯỜNG DẪN / HÀNH ĐỘNG (PATHS): Thể hiện hành động ban đầu rõ ràng; fromPlayerId và toPlayerId phải tồn tại trong players.
+   - Hệ tọa độ logic: pitch.width = 100, pitch.height = 60; x, y là phần trăm từ 0 đến 100.
+12. NGÔN NGỮ: Sử dụng thuật ngữ bóng đá tiếng Việt tự nhiên, trực quan, dễ hiểu bên đường pitch (ví dụ: "kiểm tra vai", "mở thân người góc 45 độ", "chân xa", "chạm bước một định hướng", "chuyền xuyên tuyến").
+13. ĐỊNH DẠNG: Trả về duy nhất dữ liệu JSON hợp lệ theo schema yêu cầu, không thêm bất kỳ văn bản giải thích nào khác.`;
 
 function getGameFormatGuidelines(gameFormat: string, playerCount: number): {
   dimensionsGuideline: string;
@@ -332,7 +470,7 @@ function getGameFormatGuidelines(gameFormat: string, playerCount: number): {
   }
 }
 
-function buildCoachingPrompt(
+export function buildCoachingPrompt(
   playerCount: number,
   cleanFocus: string,
   durationNum: number,
@@ -414,12 +552,32 @@ ${gameFormatTacticalGuidance(gameFormat as GameFormat)}
 YÊU CẦU BẮT BUỘC ĐỐI VỚI NỘI DUNG TỪNG BÀI TẬP:
 - exerciseName: Tên bài tập cụ thể, thể hiện rõ thể thức và tính chất chuyên môn.
 - area: Kích thước sân (dài x rộng m) PHẢI TUÂN THỦ dải kích thước của ${gameFormat} nêu trên, tránh kích thước phi thực tế.
+- equipment: Dụng cụ thực tế phải khớp với bài tập. NẾU BÀI TẬP HOẶC TRẬN ĐẤU CÓ SỬ DỤNG KHUNG THÀNH (cầu môn mini, khung thành sân 7/9/11), KHUNG THÀNH BẮT BUỘC PHẢI CÓ TRONG EQUIPMENT.
 - organization: Ghi rõ số lượng nhóm, bố trí sân bãi, phân chia toàn bộ ${playerCount} cầu thủ không bỏ sót ai. Trong giai đoạn kỹ thuật, ưu tiên nhiều nhóm nhỏ để tối đa số lần lặp lại.
 - playerOrganization is required for EVERY phase. groups * playersPerGroup + leftover must equal ${playerCount}; phase.players must also equal ${playerCount}. Count every attacker, defender and goalkeeper inside each group. Explicitly describe leftover players as active jokers/servers or a short rotating/resting role in organization, with frequent swaps. The organization text must describe exactly the same allocation. For example, 14 = 3 groups of 4 + 2 rotating jokers; 18 = 3 parallel 4v2 fields. Never write 3 groups of 4 for 14 without the extra roles, or 3 parallel 3v1 fields for 18. Keep small technical groups and frequent touches.
 - execution: Hướng dẫn vận hành chi tiết: bóng phát ra từ đâu, di chuyển thế nào, yêu cầu kỹ thuật đối với người nhận bóng, điều kiện ghi điểm, cơ chế luân chuyển xoay tua giữa các cầu thủ.
-- coachingPoints: 3-4 câu khẩu lệnh chuyên môn ngắn gọn, chỉ rõ tư thế cơ thể, cách quan sát và xử lý bóng (không lặp lại câu chữ giữa các giai đoạn).
-- progression: 1-2 biến thể điều chỉnh độ khó hợp lý (giới hạn chạm, tăng/giảm khoảng cách, bổ sung hậu vệ gây áp lực).
-- Giai đoạn cuối cùng (Thi đấu): Bắt buộc có luật thưởng điểm hoặc điều kiện chiến thuật gắn trực tiếp với chủ đề "${cleanFocus}". TUYỆT ĐỐI KHÔNG để thi đấu tự do thông thường.
+  + Trò chơi đối kháng (Phase 4) và Trận đấu thực chiến (Phase 5) TUYỆT ĐỐI KHÔNG DÙNG LUẬT GIỐNG NHAU.
+  + Trận đấu thực chiến (Phase 5) phải gần với bóng đá thật: bàn thắng bình thường luôn luôn tính 1 điểm hợp lệ; CHỈ ÁP DỤNG DUY NHẤT 1 LUẬT THƯỞNG ĐIỂM ĐƠN GIẢN gắn với mục tiêu; không gò bó quyết định của cầu thủ; HLV can thiệp tối thiểu.
+- coachingPoints: Phải bám sát đặc trưng 5 giai đoạn và TUYỆT ĐỐI KHÔNG lặp lại bất kỳ câu khẩu lệnh nào giữa các giai đoạn:
+  + Giai đoạn 1 (Khởi động): scanning (kiểm tra vai), body orientation (mở thân người), ball contact (chạm bóng êm).
+  + Giai đoạn 2 (Kỹ thuật): receiving mechanics (đón chân xa, mở hông) và first touch (chạm bước một định hướng).
+  + Giai đoạn 3 (Kỹ năng có đối kháng): perception (quan sát đối thủ sau lưng), pressure (cảm nhận áp lực), decision-making (ra quyết định: xoay người tịnh tiến nếu thoáng, nhả bóng 1 chạm hoặc che bóng nếu bị áp sát).
+  + Giai đoạn 4 (Trò chơi đối kháng): tactical application (vận dụng chiến thuật: tổ chức cự ly, khai thác biên/trung tâm, chuyển hướng sang cánh xa, chuyển trạng thái).
+  + Giai đoạn 5 (Trận đấu cuối cùng): minimal intervention (HLV can thiệp tối thiểu), transfer into realistic play (chuyển hóa thực tế, tự do ra quyết định).
+- progression: 1-2 biến thể điều chỉnh độ khó hợp lý. TIẾN TRÌNH PHẢI ĐẶC THÙ CHO TỪNG BÀI TẬP, TUYỆT ĐỐI KHÔNG DÙNG LẠI CÙNG MỘT ĐOẠN VĂN PROGRESSION CHO NHIỀU GIAI ĐOẠN.
+- diagram: BẮT BUỘC cung cấp sơ đồ có cấu trúc cho mỗi phase phản ánh chính xác cấu trúc thực tế của bài tập:
+  + Phân nhóm (grouping): nếu 8 nhóm 2 người, sơ đồ PHẢI bố trí 8 cặp riêng biệt trên sân (không vẽ 4 nhóm 4). Nếu 4 nhóm 4 người, bố trí 4 trạm/nhóm 4. Nếu trận đấu (8v8), hiển thị 2 đội rõ rệt với đúng 16 cầu thủ.
+  + Đội / Đối kháng: bài tập không đối kháng (chuyền đôi khởi động, kỹ thuật không hậu vệ) TOÀN BỘ cầu thủ thuộc team "blue", không tự bịa hậu vệ "red". Bài tập có đối kháng (kỹ năng, trò chơi nhỏ, trận đấu) phân chia hai đội "blue" và "red" (+ "neutral" cho Joker, "goalkeeper" cho thủ môn).
+  + Khung thành: NẾU EQUIPMENT KHÔNG CÓ KHUNG THÀNH, goals BẮT BUỘC PHẢI LÀ []. Nếu equipment có 4 cầu môn mini, goals có đúng 4 khung thành type "mini". Nếu trận đấu có 2 khung thành, goals có đúng 2 khung thành type "standard".
+  + Khu vực (zones): CHỈ có zones khi bài tập thực sự chia hành lang (ví dụ: 3 hành lang). Các bài tập thông thường để zones: [].
+  + pitch: { width: 100, height: 60 }
+  + players: danh sách cầu thủ [{ id: "p1", team: "blue", role: "...", x: 20, y: 30 }, ...]. Tọa độ x, y từ 0 đến 100. Số lượng cầu thủ phải khớp logic với tổ chức và KHÔNG VƯỢT QUÁ ${playerCount}. Giá trị team chỉ gồm: "blue" | "red" | "neutral" | "goalkeeper".
+  + balls: danh sách bóng [{ id: "b1", x: 22, y: 30 }]
+  + cones: danh sách cọc [{ id: "c1", x: 10, y: 10 }]
+  + goals: danh sách khung thành
+  + zones: [] hoặc khu vực chiến thuật
+  + paths: danh sách đường dẫn [{ id: "path1", type: "pass", fromPlayerId: "p1", toPlayerId: "p2" }]. type chỉ gồm: "pass" | "movement" | "dribble". fromPlayerId và toPlayerId phải tồn tại trong players.
+  + Dữ liệu tĩnh, đơn giản, không animation timing.
 - Kiểm tra tính nhất quán trước khi trả lời: số giai đoạn trong sessionOverview phải bằng phases.length; tổng thời gian các giai đoạn bằng thời lượng buổi tập, không tự chèn nghỉ giữa buổi. Tên bài tập phải khớp thể thức trong organization và playerOrganization. Với bối cảnh 7v7 nhưng thi đấu 8v8, ghi rõ "8v8 đại diện điều chỉnh (bối cảnh 7v7)", không gọi là trận 7v7 tiêu chuẩn. Điều kiện ghi điểm phải quan sát và đếm được (đường chuyền hoàn thành, vị trí nhận hoặc bàn thắng); bàn thắng bình thường vẫn hợp lệ. Không bắt buộc xoay người, mở thân hay chuyền lên bất kể áp lực; cho phép che bóng, nhả lại hoặc đổi hướng khi bị khóa.
 
 Hãy tạo giáo án xuất sắc, chuẩn mực sư phạm và trả về đúng định dạng JSON yêu cầu.`;
@@ -435,7 +593,7 @@ Hãy tạo giáo án xuất sắc, chuẩn mực sư phạm và trả về đún
  * 4. Realistic area sizes and equipment.
  * 5. Coaching points strictly tailored to topic.
  */
-function generateRealisticFootballPlan(
+export function generateRealisticFootballPlan(
   players: number,
   topic: string,
   duration: number,
@@ -490,12 +648,11 @@ function generateRealisticFootballPlan(
         organization: `Bố trí 6 cổng nón rải đều trên sân 25 × 20 m. `,
         execution: 'Cầu thủ A chuyền bóng qua cổng nón cho cầu thủ B. Trước khi nhận bóng, B phải quay đầu quan sát vai gọi tên màu cổng trống phía sau, chạm bước một mở hướng qua cổng rồi chuyền tiếp cho đồng đội khác. Luân chuyển liên tục.',
         coachingPoints: [
-          'Quan sát vai trước khi bóng tới (kiểm tra khoảng trống phía sau).',
-          'Mở thân người ở góc 45 độ về hướng tấn công để nhìn thấy cả bóng lẫn không gian.',
-          'Nhận bóng bằng chân xa (chân thuận lợi để đẩy bóng lên phía trước).',
-          'Chạm bước một êm vào khoảng trống, không hãm chết bóng tại chỗ.',
+          'Kiểm tra vai quan sát không gian xung quanh trước khi bóng tới.',
+          'Đứng tư thế mở thân người góc 45 độ, nhìn thấy cả bóng lẫn hướng di chuyển tiếp theo.',
+          'Tiếp xúc bóng êm bằng lòng trong chân xa, khống chế bóng gọn gàng trong tầm kiểm soát.',
         ],
-        progression: 'Giới hạn tối đa 2 chạm; thêm 2 cầu thủ đóng vai trò vật cản di chuyển nhẹ để tăng áp lực quan sát.',
+        progression: 'Tăng dần nhịp độ di chuyển và đổi chân nhận bóng sau mỗi 2 phút, duy trì áp lực thấp.',
       },
       {
         phase: 'Kỹ thuật',
@@ -505,12 +662,12 @@ function generateRealisticFootballPlan(
         organization: `Đặt 4 cọc tiêu ở 4 góc và 1 nón trung tâm. Cầu thủ đứng chia đều ở các góc. `,
         execution: 'Bóng chuyền từ đáy vào trung tâm. Tiền vệ giả vờ giật lùi thoát kèm, mở góc thân người nhận bóng bằng chân xa và mở bóng ngay sang cánh tiếp theo. Cầu thủ chuyền xong di chuyển tiếp nối vị trí theo chiều kim đồng hồ.',
         coachingPoints: [
-          'Giật lùi tạo khoảng trống trước khi quay lại đón bóng.',
-          'Xoay hông về hướng định chuyền tiếp theo trước khi bóng chạm chân.',
+          'Cơ chế đón bóng bằng chân xa để mở góc tịnh tiến sang hướng biên tiếp theo.',
+          'Chạm bước một định hướng về phía trước vào khoảng trống, không hãm chết bóng tại chỗ.',
+          'Xoay hông và mở ngực về phía mục tiêu định chuyền trước khi bóng chạm chân.',
           'Đường chuyền sệt, căng và đúng vào chân thuận của đồng đội.',
-          'Giao tiếp to rõ: hô "Mở!", "Quay!" hoặc "Chân thuận!".',
         ],
-        progression: 'Đổi hướng luân chuyển bóng ngược chiều kim đồng hồ để cầu thủ tập thuần thục cả hai chân.',
+        progression: 'Giới hạn tối đa 2 chạm; đổi chiều luân chuyển kim đồng hồ để cầu thủ tập thuần thục chân không thuận.',
       },
       {
         phase: 'Phát triển kỹ năng',
@@ -520,42 +677,42 @@ function generateRealisticFootballPlan(
         organization: `Sân chia làm 3 khu vực. Hai đội tranh chấp ở giữa, cầu thủ tự do đứng ở hai đầu biên. `,
         execution: 'Hai đội phối hợp kiểm soát bóng. Điểm được tính khi nhận bóng ở trung tâm với tư thế mở người và chuyền thành công sang cầu thủ đích đối diện. Cầu thủ đích khống chế 2 chạm và chuyền lại cho đội kiểm soát.',
         coachingPoints: [
-          'Căn thời điểm di chuyển vào khoảng trống khi người chuyền ngẩng đầu.',
-          'Không bao giờ đứng vuông góc với bóng; luôn giữ ngực hướng về phía mục tiêu.',
-          'Quan sát trong khoảnh khắc bóng đang lăn trên đường chuyền.',
-          'Nếu bị áp sát rát từ phía sau: nhả bóng 1 chạm; nếu có khoảng trống: quay người tiến lên.',
+          'Cảm nhận góc tiếp cận và khoảng cách áp sát của hậu vệ đối phương sau lưng.',
+          'Nếu hướng trước mở: xoay người tịnh tiến; nếu bị áp sát rát: nhả về điểm tựa một chạm hoặc che bóng.',
+          'Ra quyết định dứt khoát trước khi bóng tới để không bị động khi đối phương ập vào.',
+          'Di chuyển tạo góc tam giác hỗ trợ mới ngay sau khi chuyền bóng, không đứng yên nhìn bóng.',
         ],
-        progression: 'Cầu thủ tự do chỉ được chạm 1 lần; nếu chuyền bóng xuyên tuyến thành công được cộng 2 điểm.',
+        progression: 'Cho phép hậu vệ áp sát quyết liệt hơn ngay từ khi bóng rời chân người chuyền; rút ngắn thời gian ra quyết định.',
       },
       {
         phase: 'Tình huống đối kháng',
-        exerciseName: 'Đối kháng chuyển hướng tấn công nhanh ghi điểm 4 cầu môn nhỏ',
+        exerciseName: 'Trò chơi đối kháng 3 hành lang chuyển hướng ghi điểm 4 cầu môn nhỏ',
         area: '40 × 30 m (4 cầu môn nhỏ ở 4 góc)',
-        equipment: ['4 Khung thành nhỏ', '10 Quả bóng', 'Áo bib 2 đội'],
+        equipment: ['4 Khung thành nhỏ', '10 Quả bóng', 'Áo bib 2 đội', 'Nón đánh dấu 3 hành lang'],
         organization: `Sân 40 × 30 m với 4 cầu môn nhỏ ở 4 góc. Chia 2 đội thi đấu cân bằng, cầu thủ dư làm joker tấn công. `,
-        execution: 'Mỗi đội tấn công 2 cầu môn đối diện. Khi nhận bóng mở thân người và chuyển hướng thành công từ biên này sang biên kia trước khi ghi bàn, bàn thắng được tính 2 điểm.',
+        execution: 'Trò chơi đối kháng sân nhỏ có điều kiện: Sân chia 3 hành lang (trung tâm và 2 biên) với 4 cầu môn nhỏ ở các góc. Hai đội thi đấu có thưởng điểm chiến thuật: Bàn thắng tính 1 điểm khi đưa bóng vào cầu môn nhỏ; bàn thắng tính 2 điểm nếu trước khi dứt điểm có pha luân chuyển bóng từ hành lang trung tâm mở ra biên rồi chuyền tịnh tiến cho đồng đội. Khi mất bóng, các cầu thủ gần nhau lập tức thu hẹp cự ly bảo vệ hành lang trung tâm.',
         coachingPoints: [
-          'Kiểm tra vai để nhận diện cánh đối diện có khoảng trống thoáng hơn.',
-          'Tiếp bóng hướng lên phía trước ngay từ chạm đầu tiên.',
+          'Cầu thủ biên mở rộng vừa đủ, người trung tâm chọn thời điểm xuất hiện giữa các tuyến.',
+          'Khai thác thời điểm đối thủ dồn sang phía bóng để chuyển hướng tấn công sang cánh đối diện.',
           'Hỗ trợ cự ly tam giác quanh người cầm bóng để luôn có ít nhất 2 hướng chuyền mở.',
-          'Tận dụng tốc độ khi đối phương dồn ép một bên sân.',
+          'Khi mất bóng, các vị trí gần bóng lập tức thu hẹp cự ly để bảo vệ hướng trung tâm.',
         ],
-        progression: 'Giới hạn thời gian tấn công trong 15 giây sau khi đoạt bóng để thúc đẩy nhịp độ chuyền.',
+        progression: 'Giới hạn thời gian tấn công (15 giây sau khi đoạt bóng) để thúc đẩy nhịp độ tịnh tiến bóng về phía trước.',
       },
       {
         phase: 'Thi đấu',
-        exerciseName: 'Trận đấu 7v7 / 8v8 áp dụng tư thế mở & Giao tiếp trên sân',
+        exerciseName: 'Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn',
         area: '55 × 38 m (Sân 7 tiêu chuẩn)',
         equipment: ['2 Khung thành tiêu chuẩn', 'Bóng thi đấu', 'Áo bib phân biệt rõ ràng'],
         organization: `Thi đấu 2 đội trên toàn sân, có thủ môn. Áp dụng toàn bộ luật bóng đá thực chiến. `,
-        execution: 'Trận đấu có điều kiện mục tiêu: Thi đấu 2 đội trên toàn sân có thủ môn. Áp dụng luật tính điểm: Bàn thắng bình thường tính 1 điểm; bàn thắng xuất phát từ pha nhận bóng mở thân người tịnh tiến qua tuyến đối phương tính 2 điểm.',
+        execution: 'Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn. Áp dụng toàn bộ luật bóng đá chuẩn mực (ném biên, phạt góc, đá phạt). Bàn thắng bình thường luôn luôn được tính 1 điểm hợp lệ. Chỉ áp dụng một luật thưởng điểm đơn giản liên kết với chuyên đề: bàn thắng được tính 2 điểm nếu tình huống xuất phát từ pha nhận bóng mở thân người vượt qua một tuyến của đối phương. Cầu thủ hoàn toàn tự do sút, chuyền hoặc đi bóng tùy tình huống thực tế, huấn luyện viên can thiệp tối thiểu.',
         coachingPoints: [
-          'Thói quen quan sát xung quanh liên tục kể cả khi không có bóng.',
-          'Mở góc thân người trước mọi pha nhận bóng trên toàn mặt sân.',
-          'Tự tin cầm bóng tịnh tiến lên phía trước khi có khoảng trống.',
-          'Tổ chức cự ly đội hình cân bằng cả khi tấn công lẫn phòng ngự.',
+          'Chuyển hóa thói quen quan sát vai và mở thân người vào các tình huống thực chiến tốc độ cao.',
+          'Tự tin tự đưa ra quyết định xử lý bóng (sút, chuyền hoặc rê dắt) dựa trên khoảng trống thực tế.',
+          'Huấn luyện viên can thiệp tối thiểu để cầu thủ làm chủ hoàn toàn nhịp điệu trận đấu.',
+          'Tổ chức cự ly đội hình cân bằng và giao tiếp liên tục giữa các tuyến.',
         ],
-        progression: 'Đội ghi bàn sau một chuỗi 4 đường chuyền mở hướng liên tiếp được tính gấp đôi điểm số.',
+        progression: 'Tháo bỏ dần điều kiện thưởng điểm để toàn đội thi đấu bóng đá tự nhiên thuần túy theo luật chuẩn.',
       },
     ];
   } else if (isDefending) {
@@ -606,31 +763,31 @@ function generateRealisticFootballPlan(
       },
       {
         phase: 'Tình huống đối kháng',
-        exerciseName: 'Trò chơi nhỏ 4v4 + Khối phòng ngự kìm hãm khu vực',
+        exerciseName: 'Trò chơi nhỏ 4v4 bảo vệ 4 cầu môn mini',
         area: '35 × 25 m',
-        equipment: ['4 Cầu môn mini', 'Bóng', 'Áo bib 2 màu'],
-        organization: `Sân chia 2 nửa. Hai đội thi đấu 4v4 với nhiệm vụ bảo vệ 2 cầu môn mini. `,
-        execution: 'Đội phòng ngự phải giữ khối cự ly chặt chẽ, ép đối phương chơi bóng ra biên và cô lập cầu thủ cầm bóng để tranh chấp tay đôi.',
+        equipment: ['4 Cầu môn mini', 'Bóng tập', 'Áo bib 2 màu'],
+        organization: `Sân chia 2 nửa. Hai đội thi đấu 4v4 với nhiệm vụ bảo vệ 2 cầu môn mini sân nhà và tấn công 2 cầu môn đối diện. `,
+        execution: 'Đội phòng ngự phải giữ khối cự ly chặt chẽ, ép đối phương chơi bóng ra biên và cô lập cầu thủ cầm bóng để tranh chấp tay đôi. Đội cướp bóng thành công và ghi bàn trong vòng 10 giây được tính 2 điểm; bàn thắng bình thường tính 1 điểm.',
         coachingPoints: [
           'Cả khối dịch chuyển đồng bộ theo hướng bóng.',
           'Quyết đoán trong các pha tranh chấp 50-50.',
           'Chuyển trạng thái phản công nhanh ngay sau khi đoạt bóng.',
         ],
-        progression: 'Đội phòng ngự cướp bóng thành công và ghi bàn trong vòng 10 giây được tính 2 điểm.',
+        progression: 'Giới hạn số lần chạm bóng của đội tấn công xuống 2 chạm để tăng áp lực phòng ngự.',
       },
       {
         phase: 'Thi đấu',
-        exerciseName: 'Thi đấu đối kháng thực chiến đánh giá kỹ năng phòng ngự',
+        exerciseName: 'Thi đấu thực chiến trên sân tiêu chuẩn với 2 khung thành',
         area: '50 × 35 m',
-        equipment: ['2 Cầu môn', 'Bóng thi đấu', 'Áo bib'],
+        equipment: ['2 Cầu môn tiêu chuẩn', 'Bóng thi đấu', 'Áo bib 2 màu'],
         organization: `Thi đấu có thủ môn, áp dụng đầy đủ luật thi đấu. `,
-        execution: 'Trận đấu 2 hiệp. Huấn luyện viên tập trung quan sát hành vi phòng thủ 1v1 của các cầu thủ trên từng tuyến.',
+        execution: 'Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn. Áp dụng toàn bộ luật thi đấu chuẩn mực. Bàn thắng bình thường luôn luôn tính 1 điểm hợp lệ. Chỉ áp dụng một luật thưởng điểm đơn giản: bàn thắng xuất phát từ pha đoạt bóng 1v1 thành công ở nửa sân đối phương được tính 2 điểm. Cầu thủ hoàn toàn tự do ra quyết định, huấn luyện viên can thiệp tối thiểu.',
         coachingPoints: [
-          'Áp dụng tư thế phòng ngự chuẩn xác trong mọi tình huống tranh chấp.',
-          'Hỗ trợ bọc lót cho đồng đội khi bị đối phương qua người.',
-          'Giữ kỷ luật vị trí, không phạm lỗi nguy hiểm trước vòng cấm.',
+          'Chuyển hóa kỹ năng phòng ngự 1v1 và bọc lót vào các pha bóng thực tế.',
+          'Cầu thủ tự chủ phán đoán thời điểm tắc bóng hoặc kìm hãm đối phương.',
+          'Huấn luyện viên can thiệp tối thiểu để đánh giá tính kỷ luật vị trí của cầu thủ.',
         ],
-        progression: 'Hiệp 2 áp dụng luật: mỗi pha xoạc bóng sạch hoặc cắt bóng thành công được thưởng điểm tinh thần.',
+        progression: 'Tháo bỏ dần điều kiện thưởng điểm để toàn đội thi đấu bóng đá tự nhiên thuần túy theo luật chuẩn.',
       },
     ];
   } else if (isPressing) {
@@ -685,27 +842,27 @@ function generateRealisticFootballPlan(
         area: '40 × 30 m',
         equipment: ['4 Khung thành nhỏ', 'Bóng', 'Áo bib 2 màu'],
         organization: `Sân chia 3 phần. Hai đội thi đấu cân bằng quân số. `,
-        execution: 'Khi mất bóng ở phần sân đối phương, đội mất bóng phải lập tức pressing giành lại bóng trong vòng 5 giây.',
+        execution: 'Khi mất bóng ở phần sân đối phương, đội mất bóng phải lập tức pressing giành lại bóng trong vòng 5 giây. Ghi bàn trong 5 giây sau khi đoạt bóng được tính 2 điểm; bàn thắng bình thường tính 1 điểm.',
         coachingPoints: [
+          'Vận dụng cự ly đội hình thu hẹp để bóp nghẹt không gian chơi bóng của đối thủ.',
           'Chuyển trạng thái cực nhanh từ tấn công sang phòng ngự.',
           'Áp sát ngay lập tức người gần bóng nhất.',
-          'Giao tiếp hô hào toàn đội đồng loạt đẩy cao.',
         ],
-        progression: 'Giành lại bóng trong 5 giây và ghi bàn được cộng 3 điểm.',
+        progression: 'Rút ngắn thời gian pressing đoạt bóng xuống còn 4 giây.',
       },
       {
         phase: 'Thi đấu',
-        exerciseName: 'Đấu tập toàn diện áp dụng bẫy pressing',
+        exerciseName: 'Đấu tập toàn diện trên sân tiêu chuẩn với 2 khung thành',
         area: 'Sân 7 người tiêu chuẩn',
-        equipment: ['2 Cầu môn', 'Bóng thi đấu', 'Áo bib'],
-        organization: `Thi đấu 2 đội, HLV chỉ đạo chiến thuật pressing khu vực. `,
-        execution: 'Trận đấu thi đấu tự do với mục tiêu thực hiện thành công ít nhất 3 pha đoạt bóng tầm cao trong trận.',
+        equipment: ['2 Cầu môn tiêu chuẩn', 'Bóng thi đấu', 'Áo bib 2 màu'],
+        organization: `Thi đấu 2 đội có thủ môn, HLV chỉ đạo chiến thuật pressing khu vực. `,
+        execution: 'Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn. Áp dụng toàn bộ luật thi đấu chuẩn mực. Bàn thắng bình thường luôn luôn tính 1 điểm hợp lệ. Chỉ áp dụng một luật thưởng điểm đơn giản: bàn thắng xuất phát từ pha đoạt bóng tầm cao bằng bẫy pressing được tính 2 điểm. Cầu thủ hoàn toàn tự do ra quyết định chiến thuật, huấn luyện viên can thiệp tối thiểu.',
         coachingPoints: [
-          'Duy trì cự ly giữa các tuyến không quá 12-15 mét.',
-          'Đồng bộ nhịp dâng lên của hàng thủ khi tuyến trên pressing.',
-          'Bảo toàn thể lực: pressing thông minh theo thời điểm chứ không đuổi bóng vô ích.',
+          'Chuyển hóa thói quen nhận diện bẫy pressing vào trận đấu thực tế.',
+          'Cầu thủ tự điều tiết nhịp độ pressing thông minh theo thời điểm, không đuổi bóng vô ích.',
+          'Huấn luyện viên can thiệp tối thiểu, để toàn đội tự điều phối cự ly trên sân.',
         ],
-        progression: 'Hiệp 2 thử nghiệm pressing nửa sân (Mid-block) để so sánh hiệu quả.',
+        progression: 'Tháo bỏ dần điều kiện thưởng điểm để toàn đội thi đấu bóng đá tự nhiên thuần túy theo luật chuẩn.',
       },
     ];
   } else {
@@ -717,15 +874,15 @@ function generateRealisticFootballPlan(
         phase: 'Khởi động',
         exerciseName: `Khởi động chuyên biệt kết hợp kiểm soát & ${cleanTopic}`,
         area: '25 × 20 m',
-        equipment: ['12 Nón tập', '1 Bóng / cặp', 'Áo bib'],
+        equipment: ['12 Nón tập', '1 Bóng / cặp', 'Áo bib 2 màu'],
         organization: `Sân 25 × 20 m. `,
         execution: `Cầu thủ thực hiện các bài tập chuyền và di chuyển có trọng tâm về ${cleanTopic}, kết hợp các động tác giãn cơ động và tăng tốc ngắn.`,
         coachingPoints: [
-          'Nâng cao sự tập trung và cường độ ngay từ những phút đầu.',
-          'Kỹ thuật tiếp bóng và chuyền bóng chuẩn xác.',
           'Quan sát không gian và đồng đội trước mỗi pha chạm bóng.',
+          'Tư thế cơ thể mở góc thuận lợi để sẵn sàng xử lý tiếp theo.',
+          'Cảm giác tiếp xúc bóng êm và kiểm soát bóng gọn gàng.',
         ],
-        progression: 'Tăng nhịp độ chuyền bóng và giới hạn số chạm xuống còn 2 chạm.',
+        progression: 'Tăng nhịp độ chuyền bóng và đổi hướng di chuyển sau mỗi 2 phút, duy trì áp lực thấp.',
       },
       {
         phase: 'Kỹ thuật',
@@ -735,53 +892,53 @@ function generateRealisticFootballPlan(
         organization: `Bố trí sơ đồ luân chuyển bóng theo nhóm nhỏ. `,
         execution: `Cầu thủ thực hiện các tình huống phối hợp lặp đi lặp lại nhằm định hình phản xạ chuẩn về ${cleanTopic}.`,
         coachingPoints: [
-          'Tư thế thân người và bước đà hợp lý.',
-          'Lực chuyền bóng và độ chuẩn xác của điểm tiếp xúc.',
-          'Chạy chỗ hỗ trợ ngay sau khi thực hiện động tác.',
+          'Cơ chế tiếp xúc bóng và kỹ thuật thực hiện động tác chuẩn xác.',
+          'Chạm bước một định hướng vào khoảng trống thuận lợi.',
+          'Độ căng và điểm rơi của đường chuyền bóng.',
         ],
-        progression: 'Tăng khoảng cách chuyền và bổ sung chướng ngại vật cản trở.',
+        progression: 'Giới hạn tối đa 2 chạm; đổi hướng luân chuyển để rèn luyện cả hai chân.',
       },
       {
         phase: 'Phát triển kỹ năng',
         exerciseName: `Bài tập có đối kháng có định hướng về ${cleanTopic}`,
         area: '30 × 25 m',
-        equipment: ['Nón tập', 'Cầu môn nhỏ', 'Bóng'],
+        equipment: ['Nón tập', '2 Cầu môn nhỏ', 'Bóng', 'Áo bib 2 màu'],
         organization: `Sân chia khu vực có mục tiêu cụ thể. `,
         execution: `Tổ chức thi đấu kiểm soát bóng hoặc triển khai bóng có điều kiện nhằm tạo ra tối đa các tình huống ứng dụng ${cleanTopic}.`,
         coachingPoints: [
-          'Nhận biết thời điểm thuận lợi để ra quyết định xử lý.',
-          'Giao tiếp to rõ và chỉ dẫn cho đồng đội.',
-          'Giữ cự ly đội hình hình tam giác/kim cương xung quanh bóng.',
+          'Nhận biết vị trí và góc tiếp cận của cầu thủ phòng ngự đối phương.',
+          'Ra quyết định dứt khoát: xử lý bóng nhanh khi có khoảng trống hoặc che chắn khi bị áp sát.',
+          'Đồng đội di chuyển tạo góc hỗ trợ kịp thời cho người cầm bóng.',
         ],
-        progression: 'Giới hạn thời gian khống chế bóng hoặc thêm cầu thủ phòng ngự áp sát nhanh.',
+        progression: 'Cho phép cầu thủ phòng ngự áp sát quyết liệt hơn ngay từ khi bóng lăn.',
       },
       {
         phase: 'Tình huống đối kháng',
         exerciseName: `Trò chơi đối kháng nhỏ áp dụng ${cleanTopic}`,
         area: '35 × 30 m',
-        equipment: ['4 Cầu môn mini', 'Bóng', 'Áo bib 2 màu'],
+        equipment: ['4 Cầu môn mini', 'Bóng tập', 'Áo bib 2 màu'],
         organization: `Hai đội thi đấu với mục tiêu khai thác các khoảng trống liên quan đến ${cleanTopic}. `,
-        execution: `Trận đấu nhỏ có thưởng điểm cho các pha phối hợp hoặc xử lý thành công theo đúng chủ đề ${cleanTopic}.`,
+        execution: `Trò chơi đối kháng sân nhỏ có điều kiện: Chia 2 đội thi đấu tấn công vào các cầu môn nhỏ. Bàn thắng tính 1 điểm; bàn thắng tính 2 điểm khi xuất phát từ tình huống phối hợp bài bản theo đúng trọng tâm ${cleanTopic}. Khi mất bóng, lập tức thu hẹp cự ly đội hình.`,
         coachingPoints: [
-          'Quyết đoán và tự tin thực hiện kỹ năng trong không gian hẹp.',
-          'Khả năng chuyển đổi trạng thái khi có bóng và mất bóng.',
-          'Phối hợp ăn ý giữa các tuyến.',
+          'Vận dụng kỹ năng vào tình huống thi đấu trong không gian hẹp.',
+          'Tổ chức cự ly đội hình cân bằng và liên kết giữa các tuyến.',
+          'Chuyển trạng thái phản xạ nhanh khi có bóng và mất bóng.',
         ],
-        progression: 'Đội hoàn thành chuỗi phối hợp đúng yêu cầu được tính gấp đôi số điểm bàn thắng.',
+        progression: 'Giới hạn thời gian tấn công (15 giây sau khi đoạt bóng) để thúc đẩy nhịp độ tịnh tiến bóng về phía trước.',
       },
       {
         phase: 'Thi đấu',
-        exerciseName: `Trận đấu tự do kiểm tra & Đánh giá năng lực thực chiến`,
+        exerciseName: `Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành`,
         area: 'Sân tiêu chuẩn',
-        equipment: ['2 Cầu môn', 'Bóng thi đấu', 'Áo bib'],
+        equipment: ['2 Cầu môn tiêu chuẩn', 'Bóng thi đấu', 'Áo bib 2 màu'],
         organization: `Hai đội thi đấu trên toàn sân với thủ môn. `,
-        execution: `Thi đấu tự do với sự quan sát của HLV. Huấn luyện viên động viên cầu thủ chủ động áp dụng các bài học từ các giai đoạn trước vào trận đấu.`,
+        execution: `Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn. Áp dụng đầy đủ luật thi đấu bóng đá chuẩn mực. Bàn thắng bình thường luôn luôn được tính 1 điểm hợp lệ. Chỉ áp dụng duy nhất một điều kiện thưởng điểm đơn giản: bàn thắng tính 2 điểm nếu tình huống xuất phát từ pha vận dụng thành công kỹ thuật ${cleanTopic}. Cầu thủ hoàn toàn tự do ra quyết định trên sân, huấn luyện viên can thiệp tối thiểu.`,
         coachingPoints: [
-          'Thực hiện đúng các nguyên tắc chuyên môn đã rèn luyện.',
-          'Tinh thần đồng đội và nỗ lực thi đấu hết mình.',
-          'Tự tin giải quyết tình huống trên sân.',
+          'Chuyển hóa các kỹ năng đã rèn luyện vào nhịp điệu thi đấu thực tế.',
+          'Cầu thủ tự tin và chủ động giải quyết tình huống trên sân.',
+          'Huấn luyện viên can thiệp tối thiểu để đánh giá tính độc lập của toàn đội.',
         ],
-        progression: 'Tổng kết và nhận xét rút kinh nghiệm cùng toàn đội sau trận đấu.',
+        progression: 'Tháo bỏ dần điều kiện thưởng điểm để toàn đội thi đấu bóng đá tự nhiên thuần túy theo luật chuẩn.',
       },
     ];
   }
@@ -856,12 +1013,24 @@ function generateRealisticFootballPlan(
     duration: durations[idx],
     players: players,
     area: idx === 4 ? finalGameArea : defaultAreas[idx],
-    equipment: p.equipment,
+    equipment: content.equipment || p.equipment,
     organization: `${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}. ${spatialSetup}`,
     execution: content.execution,
     coachingPoints: content.coachingPoints,
     progression: content.progression,
     playerOrganization: toPlayerOrganization(players, blockTypes[idx]),
+    diagram: buildDefaultStructuredDiagram({
+      blockType: blockTypes[idx],
+      playerCount: players,
+      playerOrganization: toPlayerOrganization(players, blockTypes[idx]),
+      exerciseName: content.exerciseName,
+      topic: cleanTopic,
+      organization: `${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}. ${spatialSetup}`,
+      execution: content.execution,
+      equipment: content.equipment || p.equipment,
+      area: idx === 4 ? finalGameArea : defaultAreas[idx],
+      gameFormat: gameFormat as GameFormat,
+    }),
     };
   });
 
@@ -1004,4 +1173,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename)) {
+  startServer();
+}

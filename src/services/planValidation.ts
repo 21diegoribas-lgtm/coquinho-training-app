@@ -3,6 +3,7 @@ import { GeminiTrainingPlan, TrainingPhase } from '../types/trainingPlan';
 import { Exercise, GameFormat, SessionDuration, TrainingSession } from '../types/session';
 import { isSessionDuration, normalizeDurationsToTotal } from './durationUtils';
 import { validatePlanConsistency, validateTrainingSessionConsistency } from './sessionConsistency';
+import { safeStructuredDiagram, validateStructuredDiagram } from './structuredDiagram';
 
 export const GENERIC_PROGRESSION =
   'Điều chỉnh độ khó: giới hạn số lần chạm bóng (1-2 chạm), thu hẹp hoặc mở rộng diện tích sân, hoặc bổ sung cầu thủ phòng ngự áp sát để tăng tính thực chiến.';
@@ -87,6 +88,12 @@ export function validateGeminiPlan(plan: unknown): PlanValidationResult {
       if (!Array.isArray(points) || points.length === 0 || points.some(v => typeof v !== 'string' || !v.trim())) {
         errors.push(`phase[${idx}].coachingPoints`);
       }
+      if (ph.diagram !== undefined) {
+        const diagramRes = validateStructuredDiagram(ph.diagram, Number(ph.players));
+        if (!diagramRes.ok) {
+          errors.push(...diagramRes.errors.map(err => `phase[${idx}].diagram ${err}`));
+        }
+      }
     });
   }
 
@@ -107,6 +114,8 @@ export function sanitizeGeminiPlan(
   const usedIds = new Set<string>();
   const phases: TrainingPhase[] = phasesRaw.map((phase, idx) => {
     const ph = (phase || {}) as Record<string, unknown>;
+    const blockType = (['warm_up', 'technical', 'skill', 'small_sided', 'match'] as const)[Math.min(idx, 4)];
+    const playerOrg = normalizeOrganization(ph.playerOrganization, fallbacks.players);
     return {
       id: uniqueId(asNonEmptyString(ph.id, ''), usedIds, `phase-${idx + 1}`),
       phase: asNonEmptyString(ph.phase, `Giai đoạn ${idx + 1}`),
@@ -115,7 +124,7 @@ export function sanitizeGeminiPlan(
       players: fallbacks.players,
       area: asNonEmptyString(ph.area, '25 × 20 m'),
       equipment: asStringArray(ph.equipment, ['Bóng', 'Cọc tiêu', 'Áo bib']),
-      organization: explicitOrganization(String(ph.organization), fallbacks.players, normalizeOrganization(ph.playerOrganization, fallbacks.players)),
+      organization: explicitOrganization(String(ph.organization), fallbacks.players, playerOrg),
       execution: asNonEmptyString(ph.execution, 'Cầu thủ thực hiện các bài tập chuyền và di chuyển.'),
       coachingPoints: asStringArray(ph.coachingPoints, [
         'Quan sát trước khi nhận bóng.',
@@ -124,7 +133,14 @@ export function sanitizeGeminiPlan(
       progression: typeof ph.progression === 'string' && ph.progression.trim()
         ? ph.progression.trim()
         : undefined,
-      playerOrganization: normalizeOrganization(ph.playerOrganization, fallbacks.players),
+      playerOrganization: playerOrg,
+      diagram: safeStructuredDiagram(ph.diagram, fallbacks.players, {
+        blockType,
+        playerCount: fallbacks.players,
+        playerOrganization: playerOrg,
+        exerciseName: asNonEmptyString(ph.exerciseName, `Bài tập ${idx + 1}`),
+        topic: fallbacks.topic,
+      }),
     };
   });
 
@@ -193,6 +209,16 @@ export function sanitizeTrainingSession(session: unknown): TrainingSession | nul
       howItWorks,
       coachingPoints,
       pitchDiagram: safeDiagram(b.pitchDiagram),
+      diagram: safeStructuredDiagram(b.diagram, asPositiveNumber(raw.playerCount, 16), {
+        blockType: (['warm_up', 'technical', 'skill', 'small_sided', 'match'] as const)[Math.min(idx, 4)],
+        playerCount: asPositiveNumber(raw.playerCount, 16),
+        playerOrganization:
+          b.playerOrganization && typeof b.playerOrganization === 'object'
+            ? (b.playerOrganization as Exercise['playerOrganization'])
+            : undefined,
+        exerciseName: asNonEmptyString(b.exerciseName, `Bài tập ${idx + 1}`),
+        topic: asNonEmptyString(raw.title, 'Bóng đá'),
+      }),
       progression: typeof b.progression === 'string' && b.progression.trim() ? b.progression.trim() : undefined,
       playerOrganization:
         b.playerOrganization && typeof b.playerOrganization === 'object'

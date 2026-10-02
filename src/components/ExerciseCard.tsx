@@ -159,9 +159,10 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
                 </button>
               </div>
 
-              {/* Khung sơ đồ sân: giữ đúng tỷ lệ 16:10 tự nhiên, max-width hợp lý, không bao giờ bị kéo bẹt */}
+              {/* Khung sơ đồ sân: giữ đúng tỷ lệ 5:3 tự nhiên, max-width hợp lý, không bao giờ bị kéo bẹt */}
               <div className="w-full max-w-lg mx-auto">
                 <PitchDiagram
+                  diagram={exercise.diagram}
                   data={exercise.pitchDiagram}
                   isSimulating={isSimulating}
                 />

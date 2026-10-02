@@ -1,8 +1,21 @@
-import React from 'react';
-import { PitchDiagramData, PitchPlayer } from '../types/session';
+import React, { useMemo } from 'react';
+import {
+  DiagramGoal,
+  DiagramPlayer,
+  PitchDiagramData,
+  PitchPlayer,
+  StructuredDrillDiagram,
+} from '../types/session';
+import {
+  buildWavyPath,
+  getGoalGeometry,
+  getTeamStyle,
+  resolvePathCoordinates,
+} from '../services/structuredDiagram';
 
 interface PitchDiagramProps {
   data?: PitchDiagramData;
+  diagram?: StructuredDrillDiagram;
   className?: string;
   isSimulating?: boolean;
   highlightPlayerId?: string;
@@ -10,28 +23,564 @@ interface PitchDiagramProps {
 
 export const PitchDiagram: React.FC<PitchDiagramProps> = ({
   data,
+  diagram,
   className = '',
   isSimulating = false,
   highlightPlayerId,
 }) => {
-  if (!data) return null;
+  // Ưu tiên sử dụng structured diagram (D1/D2); nếu không có thì fallback về pitchDiagram legacy
+  const hasStructuredDiagram = Boolean(
+    diagram &&
+    Array.isArray(diagram.players) &&
+    diagram.players.length > 0
+  );
 
+  if (!hasStructuredDiagram && !data) {
+    return null;
+  }
+
+  if (hasStructuredDiagram && diagram) {
+    return (
+      <StructuredPitchDiagramView
+        diagram={diagram}
+        className={className}
+        highlightPlayerId={highlightPlayerId}
+      />
+    );
+  }
+
+  return (
+    <LegacyPitchDiagramView
+      data={data!}
+      className={className}
+      isSimulating={isSimulating}
+      highlightPlayerId={highlightPlayerId}
+    />
+  );
+};
+
+// =============================================================================
+// NEW STRUCTURED DIAGRAM RENDERER (D2)
+// =============================================================================
+interface StructuredViewProps {
+  diagram: StructuredDrillDiagram;
+  className?: string;
+  highlightPlayerId?: string;
+}
+
+const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
+  diagram,
+  className = '',
+  highlightPlayerId,
+}) => {
+  // Hệ tọa độ logic chuẩn 1000 x 600 (tỷ lệ 5:3 khớp pitch width 100 / height 60)
+  const toX = (pct: number) => {
+    if (typeof pct !== 'number' || !Number.isFinite(pct)) return 500;
+    return (Math.max(0, Math.min(100, pct)) / 100) * 1000;
+  };
+
+  const toY = (pct: number) => {
+    if (typeof pct !== 'number' || !Number.isFinite(pct)) return 300;
+    return (Math.max(0, Math.min(100, pct)) / 100) * 600;
+  };
+
+  const players = Array.isArray(diagram.players) ? diagram.players : [];
+  const balls = Array.isArray(diagram.balls) ? diagram.balls : [];
+  const cones = Array.isArray(diagram.cones) ? diagram.cones : [];
+  const goals = Array.isArray(diagram.goals) ? diagram.goals : [];
+  const zones = Array.isArray(diagram.zones) ? diagram.zones : [];
+  const paths = Array.isArray(diagram.paths) ? diagram.paths : [];
+
+  // Tạo map id -> player để giải quyết tọa độ động cho paths
+  const playerMap = useMemo(() => {
+    const map = new Map<string, DiagramPlayer>();
+    players.forEach((p) => {
+      if (p && typeof p.id === 'string') {
+        map.set(p.id, p);
+      }
+    });
+    return map;
+  }, [players]);
+
+  // Giải quyết tọa độ paths từ playerMap an toàn
+  const resolvedPaths = useMemo(() => {
+    return paths
+      .map((p) => resolvePathCoordinates(p, playerMap, toX, toY, 18))
+      .filter((p): p is NonNullable<typeof p> => p !== null);
+  }, [paths, playerMap]);
+
+  // Các đội thực sự có mặt trong sơ đồ để hiển thị chú thích chính xác
+  const presentTeams = useMemo(() => {
+    const set = new Set<string>();
+    players.forEach((p) => {
+      if (p && p.team) set.add(p.team);
+    });
+    return set;
+  }, [players]);
+
+  const formatPlayerNumber = (player: DiagramPlayer): string => {
+    if (player.team === 'goalkeeper' || player.role === 'goalkeeper' || player.role === 'gk') {
+      return 'GK';
+    }
+    const id = player.id || '';
+    if (id.startsWith('p') && id.length > 1 && !isNaN(Number(id.slice(1)))) {
+      return id.slice(1);
+    }
+    if (id.length <= 3) return id.toUpperCase();
+    return id.slice(0, 2).toUpperCase();
+  };
+
+  return (
+    <div className={`drill-board-wrapper w-full max-w-full ${className}`}>
+      {/* Khung sơ đồ với aspect-ratio 5:3 chuẩn tỷ lệ sân 100:60, hoàn toàn responsive trên mobile & desktop */}
+      <div className="drill-board relative w-full aspect-[5/3] overflow-hidden rounded-lg border border-stone-300 bg-[#164336] shadow-sm select-none">
+        <svg
+          viewBox="0 0 1000 600"
+          preserveAspectRatio="xMidYMid meet"
+          className="absolute inset-0 h-full w-full"
+          aria-label="Sơ đồ bài tập bóng đá chiến thuật"
+        >
+          <defs>
+            {/* Lớp sọc cỏ tự nhiên nằm ngang */}
+            <pattern id="turf-pattern-structured" width="1000" height="120" patternUnits="userSpaceOnUse">
+              <rect width="1000" height="60" fill="#143d31" />
+              <rect y="60" width="1000" height="60" fill="#18483a" />
+            </pattern>
+
+            {/* Mũi tên chuyền bóng (vàng chanh) */}
+            <marker
+              id="sd-arrow-pass"
+              viewBox="0 0 12 12"
+              refX="9"
+              refY="6"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 1 2 L 10 6 L 1 10 z" fill="#fde047" />
+            </marker>
+
+            {/* Mũi tên chạy chỗ di chuyển không bóng (xanh da trời) */}
+            <marker
+              id="sd-arrow-movement"
+              viewBox="0 0 12 12"
+              refX="9"
+              refY="6"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 1 2 L 10 6 L 1 10 z" fill="#38bdf8" />
+            </marker>
+
+            {/* Mũi tên dẫn bóng / rê dắt (cam sáng) */}
+            <marker
+              id="sd-arrow-dribble"
+              viewBox="0 0 12 12"
+              refX="9"
+              refY="6"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 1 2 L 10 6 L 1 10 z" fill="#fb923c" />
+            </marker>
+          </defs>
+
+          {/* LỚP 1: MẶT CỎ & ĐƯỜNG KẺ SÂN BÓNG */}
+          <rect width="1000" height="600" fill="url(#turf-pattern-structured)" />
+
+          {/* Đường biên sân bóng tiêu chuẩn (canh lề 40px ngang, 25px dọc) */}
+          <rect
+            x="40"
+            y="25"
+            width="920"
+            height="550"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="3.5"
+            strokeOpacity="0.6"
+            rx="3"
+          />
+
+          {/* Đường giữa sân chia đôi sân ngang */}
+          <line
+            x1="500"
+            y1="25"
+            x2="500"
+            y2="575"
+            stroke="#ffffff"
+            strokeWidth="3"
+            strokeOpacity="0.5"
+          />
+
+          {/* Vòng tròn trung tâm & điểm phát bóng */}
+          <circle
+            cx="500"
+            cy="300"
+            r="70"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="3"
+            strokeOpacity="0.5"
+          />
+          <circle cx="500" cy="300" r="4.5" fill="#ffffff" fillOpacity="0.8" />
+
+          {/* VÒNG CẤM ĐỊA BÊN TRÁI */}
+          <rect
+            x="40"
+            y="150"
+            width="150"
+            height="300"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="2.5"
+            strokeOpacity="0.45"
+          />
+          <rect
+            x="40"
+            y="220"
+            width="55"
+            height="160"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="2"
+            strokeOpacity="0.4"
+          />
+          <circle cx="150" cy="300" r="4" fill="#ffffff" fillOpacity="0.75" />
+          <path
+            d="M 190 255 A 70 70 0 0 1 190 345"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="2"
+            strokeOpacity="0.4"
+          />
+
+          {/* VÒNG CẤM ĐỊA BÊN PHẢI */}
+          <rect
+            x="810"
+            y="150"
+            width="150"
+            height="300"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="2.5"
+            strokeOpacity="0.45"
+          />
+          <rect
+            x="905"
+            y="220"
+            width="55"
+            height="160"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="2"
+            strokeOpacity="0.4"
+          />
+          <circle cx="850" cy="300" r="4" fill="#ffffff" fillOpacity="0.75" />
+          <path
+            d="M 810 255 A 70 70 0 0 0 810 345"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="2"
+            strokeOpacity="0.4"
+          />
+
+          {/* Vòng cung 4 góc sân phạt góc */}
+          <path d="M 40 40 A 15 15 0 0 0 55 25" fill="none" stroke="#ffffff" strokeWidth="2" strokeOpacity="0.4" />
+          <path d="M 40 560 A 15 15 0 0 1 55 575" fill="none" stroke="#ffffff" strokeWidth="2" strokeOpacity="0.4" />
+          <path d="M 945 25 A 15 15 0 0 0 960 40" fill="none" stroke="#ffffff" strokeWidth="2" strokeOpacity="0.4" />
+          <path d="M 945 575 A 15 15 0 0 1 960 560" fill="none" stroke="#ffffff" strokeWidth="2" strokeOpacity="0.4" />
+
+          {/* LỚP 2: KHU VỰC CHIẾN THUẬT / Ô CHIA SÂN (ZONES) */}
+          <g className="zones-layer">
+            {zones.map((zone, idx) => {
+              if (
+                typeof zone.x !== 'number' ||
+                typeof zone.y !== 'number' ||
+                typeof zone.width !== 'number' ||
+                typeof zone.height !== 'number'
+              ) {
+                return null;
+              }
+              const zx = toX(zone.x);
+              const zy = toY(zone.y);
+              const zw = (Math.max(0, Math.min(100, zone.width)) / 100) * 1000;
+              const zh = (Math.max(0, Math.min(100, zone.height)) / 100) * 600;
+              return (
+                <g key={zone.id || `zone-${idx}`}>
+                  <rect
+                    x={zx}
+                    y={zy}
+                    width={zw}
+                    height={zh}
+                    fill="rgba(255, 255, 255, 0.08)"
+                    stroke="#fde047"
+                    strokeWidth="1.8"
+                    strokeDasharray="6,4"
+                    rx="4"
+                  />
+                  {zone.label && (
+                    <text
+                      x={zx + zw / 2}
+                      y={zy + 18}
+                      textAnchor="middle"
+                      fill="#fde047"
+                      fontSize="12"
+                      fontWeight="600"
+                      fontFamily="Plus Jakarta Sans, sans-serif"
+                    >
+                      {String(zone.label)}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </g>
+
+          {/* LỚP 3: ĐƯỜNG LUÂN CHUYỂN CHIẾN THUẬT (PATHS) */}
+          <g className="paths-layer">
+            {resolvedPaths.map((p) => {
+              if (p.type === 'pass') {
+                return (
+                  <line
+                    key={p.id}
+                    x1={p.startX}
+                    y1={p.startY}
+                    x2={p.endX}
+                    y2={p.endY}
+                    stroke="#fde047"
+                    strokeWidth="3.2"
+                    markerEnd="url(#sd-arrow-pass)"
+                    strokeLinecap="round"
+                    opacity="0.95"
+                  />
+                );
+              }
+
+              if (p.type === 'movement') {
+                return (
+                  <line
+                    key={p.id}
+                    x1={p.startX}
+                    y1={p.startY}
+                    x2={p.endX}
+                    y2={p.endY}
+                    stroke="#38bdf8"
+                    strokeWidth="2.8"
+                    strokeDasharray="7,5"
+                    markerEnd="url(#sd-arrow-movement)"
+                    strokeLinecap="round"
+                    opacity="0.95"
+                  />
+                );
+              }
+
+              // Dribble / Rê dắt bóng: đường lượn sóng màu cam đặc trưng
+              const wavyD = buildWavyPath(p.startX, p.startY, p.endX, p.endY, 4, 5);
+              return (
+                <path
+                  key={p.id}
+                  d={wavyD}
+                  fill="none"
+                  stroke="#fb923c"
+                  strokeWidth="3.2"
+                  strokeDasharray="4,3"
+                  markerEnd="url(#sd-arrow-dribble)"
+                  strokeLinecap="round"
+                  opacity="0.95"
+                />
+              );
+            })}
+          </g>
+
+          {/* LỚP 4: CẦU MÔN & CỌC TIÊU / NÓN TẬP (EQUIPMENT) */}
+          <g className="equipment-layer">
+            {/* Cầu môn (Goals): Hỗ trợ mini goal & standard goal với orientation */}
+            {goals.map((goal, idx) => {
+              if (typeof goal.x !== 'number' || typeof goal.y !== 'number') return null;
+              const geom = getGoalGeometry(goal, toX, toY);
+              return (
+                <g key={goal.id || `goal-${idx}`} className="goal-marker">
+                  {/* Lưới cầu môn */}
+                  <path
+                    d={geom.pathD}
+                    fill={geom.isMini ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.22)'}
+                    stroke="#ffffff"
+                    strokeWidth={geom.isMini ? '2.5' : '3.8'}
+                    strokeDasharray={geom.isMini ? '6,4' : undefined}
+                  />
+                  {/* Vân lưới bên trong */}
+                  <path
+                    d={geom.netD}
+                    fill="none"
+                    stroke="#ffffff"
+                    strokeWidth="1.2"
+                    strokeOpacity="0.4"
+                  />
+                </g>
+              );
+            })}
+
+            {/* Cọc tiêu / Nón tập (Cones) */}
+            {cones.map((c, idx) => {
+              if (typeof c.x !== 'number' || typeof c.y !== 'number') return null;
+              const cx = toX(c.x);
+              const cy = toY(c.y);
+              return (
+                <g key={c.id || `cone-${idx}`} className="cone-marker">
+                  <ellipse cx={cx} cy={cy + 6} rx={7} ry={2.5} fill="#c2410c" />
+                  <polygon
+                    points={`${cx},${cy - 9} ${cx - 6},${cy + 6} ${cx + 6},${cy + 6}`}
+                    fill="#f97316"
+                    stroke="#ea580c"
+                    strokeWidth="1.2"
+                  />
+                </g>
+              );
+            })}
+          </g>
+
+          {/* LỚP 5: CẦU THỦ (PLAYERS) */}
+          <g className="players-layer">
+            {players.map((p, idx) => {
+              if (typeof p.x !== 'number' || typeof p.y !== 'number') return null;
+              const px = toX(p.x);
+              const py = toY(p.y);
+              const teamStyle = getTeamStyle(p.team);
+              const label = formatPlayerNumber(p);
+              const isHighlighted = highlightPlayerId === p.id;
+
+              return (
+                <g
+                  key={p.id || `player-${idx}`}
+                  transform={`translate(${px}, ${py})`}
+                  className="cursor-pointer"
+                >
+                  {/* Vòng viền sáng khi được highlight */}
+                  {isHighlighted && (
+                    <circle
+                      r="26"
+                      fill="none"
+                      stroke="#fde047"
+                      strokeWidth="3.5"
+                      strokeDasharray="6,4"
+                      className="animate-spin"
+                      style={{ animationDuration: '4s' }}
+                    />
+                  )}
+
+                  {/* Vòng tròn thân cầu thủ */}
+                  <circle
+                    r="18"
+                    fill={teamStyle.fill}
+                    stroke={teamStyle.stroke}
+                    strokeWidth="2.5"
+                    filter="drop-shadow(0 2px 4px rgba(0,0,0,0.45))"
+                  />
+
+                  {/* Số áo / Ký hiệu vai trò */}
+                  <text
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={teamStyle.text}
+                    fontSize={label.length > 2 ? '10.5' : '12'}
+                    fontWeight="800"
+                    fontFamily="Plus Jakarta Sans, system-ui, sans-serif"
+                  >
+                    {label}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+
+          {/* LỚP 6: QUẢ BÓNG (BALLS) - Kích thước rõ ràng nhỏ hơn cầu thủ (r=7.5 vs r=18) */}
+          <g className="balls-layer">
+            {balls.map((b, idx) => {
+              if (typeof b.x !== 'number' || typeof b.y !== 'number') return null;
+              const bx = toX(b.x);
+              const by = toY(b.y);
+              return (
+                <g key={b.id || `ball-${idx}`} transform={`translate(${bx}, ${by})`}>
+                  <circle
+                    r="7.5"
+                    fill="#ffffff"
+                    stroke="#0f172a"
+                    strokeWidth="1.8"
+                    filter="drop-shadow(0 2px 3px rgba(0,0,0,0.5))"
+                  />
+                  <circle r="3" fill="#0f172a" />
+                </g>
+              );
+            })}
+          </g>
+        </svg>
+
+        {/* Chú thích màu sắc các đội thực sự có mặt */}
+        <div className="absolute bottom-2 right-2.5 flex items-center gap-2 rounded bg-black/80 px-2 py-1 text-[11px] text-white/95 backdrop-blur-xs font-medium pointer-events-none">
+          {presentTeams.has('blue') && (
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-full border border-white bg-blue-600" />
+              <span>Xanh</span>
+            </span>
+          )}
+          {presentTeams.has('red') && (
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-full border border-white bg-red-600" />
+              <span>Đỏ</span>
+            </span>
+          )}
+          {presentTeams.has('neutral') && (
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-full border border-stone-800 bg-amber-400" />
+              <span>Tự do</span>
+            </span>
+          )}
+          {presentTeams.has('goalkeeper') && (
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-full border border-white bg-emerald-500" />
+              <span>Thủ môn</span>
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =============================================================================
+// LEGACY DIAGRAM FALLBACK RENDERER
+// Giữ nguyên 100% để đảm bảo tương thích ngược với các giáo án đã lưu trước đây
+// =============================================================================
+interface LegacyViewProps {
+  data: PitchDiagramData;
+  className?: string;
+  isSimulating?: boolean;
+  highlightPlayerId?: string;
+}
+
+const LegacyPitchDiagramView: React.FC<LegacyViewProps> = ({
+  data,
+  className = '',
+  isSimulating = false,
+  highlightPlayerId,
+}) => {
   const { players = [], cones = [], goals = [], arrows = [], ball, coachingCueOverlay } = data;
 
-  // Chuyển đổi tọa độ phần trăm (0..100) sang hệ tọa độ logic chuẩn 1600 x 1000 (tỷ lệ chuẩn sân 16:10)
   const toX = (pct: number) => (pct / 100) * 1600;
   const toY = (pct: number) => (pct / 100) * 1000;
 
   const getPlayerFill = (role: PitchPlayer['role']) => {
     switch (role) {
       case 'teamA':
-        return '#ffffff'; // Đội A - Áo trắng
+        return '#ffffff';
       case 'teamB':
-        return '#0f172a'; // Đội B - Áo xanh đen/navy
+        return '#0f172a';
       case 'neutral':
-        return '#f59e0b'; // Cầu thủ tự do/trung gian - Vàng hổ phách
+        return '#f59e0b';
       case 'gk':
-        return '#10b981'; // Thủ môn - Xanh lá sáng
+        return '#10b981';
       default:
         return '#f1f5f9';
     }
@@ -83,7 +632,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
 
   return (
     <div className={`drill-board-wrapper w-full max-w-full ${className}`}>
-      {/* Khung sơ đồ với aspect-ratio 16:10 chuẩn tỷ lệ sân bóng tự nhiên, không méo hay bẹt trên mọi kích thước */}
       <div className="drill-board relative w-full aspect-[16/10] overflow-hidden rounded-lg border border-stone-300 bg-[#164336] shadow-sm select-none">
         <svg
           viewBox="0 0 1600 1000"
@@ -92,13 +640,11 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
           aria-label="Sơ đồ chiến thuật sân bóng đá"
         >
           <defs>
-            {/* Vân cỏ tự nhiên sọc ngang sân bóng */}
             <pattern id="turf-stripes-1610" width="1600" height="200" patternUnits="userSpaceOnUse">
               <rect width="1600" height="100" fill="#143d31" />
               <rect y="100" width="1600" height="100" fill="#18483a" />
             </pattern>
 
-            {/* Mũi tên chuyền bóng (vàng) */}
             <marker
               id="tac-arrow-pass"
               viewBox="0 0 12 12"
@@ -111,7 +657,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
               <path d="M 0 1.5 L 10 6 L 0 10.5 z" fill="#fde047" />
             </marker>
 
-            {/* Mũi tên chạy chỗ không bóng (xanh dương đứt đoạn) */}
             <marker
               id="tac-arrow-run"
               viewBox="0 0 12 12"
@@ -124,7 +669,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
               <path d="M 0 1.5 L 10 6 L 0 10.5 z" fill="#38bdf8" />
             </marker>
 
-            {/* Mũi tên dẫn bóng (cam) */}
             <marker
               id="tac-arrow-dribble"
               viewBox="0 0 12 12"
@@ -138,10 +682,8 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             </marker>
           </defs>
 
-          {/* LỚP 1: MẶT CỎ SÂN BÓNG */}
           <rect width="1600" height="1000" fill="url(#turf-stripes-1610)" />
 
-          {/* Đường biên sân (canh lề đều 60px ngang, 40px dọc) */}
           <rect
             x="60"
             y="40"
@@ -154,7 +696,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             rx="4"
           />
 
-          {/* Đường giữa sân */}
           <line
             x1="60"
             y1="500"
@@ -165,7 +706,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             strokeOpacity="0.5"
           />
 
-          {/* Vòng tròn trung tâm & điểm phát bóng */}
           <circle
             cx="800"
             cy="500"
@@ -177,7 +717,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
           />
           <circle cx="800" cy="500" r="7" fill="#ffffff" fillOpacity="0.8" />
 
-          {/* Vòng cấm địa phía trên (Cầu môn trên) */}
           <rect
             x="460"
             y="40"
@@ -188,7 +727,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             strokeWidth="3.5"
             strokeOpacity="0.45"
           />
-          {/* Khu vực 5m50 phía trên */}
           <rect
             x="610"
             y="40"
@@ -201,7 +739,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
           />
           <circle cx="800" cy="150" r="6" fill="#ffffff" fillOpacity="0.75" />
 
-          {/* Vòng cấm địa phía dưới (Cầu môn dưới) */}
           <rect
             x="460"
             y="780"
@@ -212,7 +749,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             strokeWidth="3.5"
             strokeOpacity="0.45"
           />
-          {/* Khu vực 5m50 phía dưới */}
           <rect
             x="610"
             y="895"
@@ -225,7 +761,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
           />
           <circle cx="800" cy="850" r="6" fill="#ffffff" fillOpacity="0.75" />
 
-          {/* Cầu môn chính 2 đầu sân */}
           <rect
             x="670"
             y="24"
@@ -245,7 +780,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             strokeWidth="5"
           />
 
-          {/* Cầu môn mini hoặc mục tiêu bổ sung */}
           {goals.map((goal, idx) => {
             const gx = toX(goal.x);
             const gy = toY(goal.y);
@@ -265,7 +799,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             );
           })}
 
-          {/* LỚP 2: NÓN TẬP (CONES) */}
           {cones.map((c, idx) => {
             const cx = toX(c.x);
             const cy = toY(c.y);
@@ -280,7 +813,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             );
           })}
 
-          {/* LỚP 3: ĐƯỜNG CHUYỀN & ĐƯỜNG CHẠY CHIẾN THUẬT */}
           {arrows.map((arr, idx) => {
             const x1 = toX(arr.from[0]);
             const y1 = toY(arr.from[1]);
@@ -308,7 +840,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             );
           })}
 
-          {/* LỚP 4: CẦU THỦ (ICON RÕ RÀNG, DỄ NHÌN, TỶ LỆ CHUẨN) */}
           {players.map((p, idx) => {
             const currentX = toX(isSimulating && p.targetX ? p.targetX : p.x);
             const currentY = toY(isSimulating && p.targetY ? p.targetY : p.y);
@@ -320,7 +851,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
                 transform={`translate(${currentX}, ${currentY}) rotate(${p.rotation || 0})`}
                 className="transition-all duration-1000 ease-in-out cursor-pointer"
               >
-                {/* Vòng sáng nổi bật khi cần nhấn mạnh vị trí */}
                 {isHighlighted && (
                   <circle
                     r="48"
@@ -333,7 +863,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
                   />
                 )}
 
-                {/* Vòng tròn thân cầu thủ */}
                 <circle
                   r="34"
                   fill={getPlayerFill(p.role)}
@@ -342,7 +871,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
                   filter="drop-shadow(0 4px 6px rgba(0,0,0,0.5))"
                 />
 
-                {/* Số áo / Ký hiệu vai trò */}
                 {p.label && (
                   <text
                     textAnchor="middle"
@@ -359,7 +887,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             );
           })}
 
-          {/* LỚP 5: QUẢ BÓNG */}
           {ball && (
             <g
               transform={`translate(${toX(ball.x)}, ${toY(ball.y)})`}
@@ -378,7 +905,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
             </g>
           )}
 
-          {/* LỚP 6: DÒNG NHẮC HUẤN LUYỆN TRÊN SÂN */}
           {coachingCueOverlay && (
             <g transform="translate(800, 920)">
               <rect
@@ -404,7 +930,6 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
           )}
         </svg>
 
-        {/* Chú thích màu sắc đội hình tiếng Việt */}
         <div className="absolute bottom-2.5 right-3 flex items-center gap-2.5 rounded bg-black/80 px-2.5 py-1 text-xs text-white/95 backdrop-blur-xs font-medium">
           <span className="flex items-center gap-1.5">
             <span className="inline-block h-2.5 w-2.5 rounded-full border border-stone-800 bg-white" />

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GameFormat } from './session';
+import { GameFormat, StructuredDrillDiagram } from './session';
 
 export interface PlayerOrganization {
   groups: number;
@@ -27,8 +27,7 @@ export interface TrainingPhase {
   progression?: string;
   playerOrganization?: PlayerOrganization;
 
-  // Future compatibility fields for subsequent diagram & animation expansions
-  diagram?: unknown;
+  diagram?: StructuredDrillDiagram;
   animation?: unknown;
   playerPositions?: unknown[];
   ballPath?: unknown[];

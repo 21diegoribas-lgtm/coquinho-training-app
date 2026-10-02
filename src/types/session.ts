@@ -48,6 +48,69 @@ export interface PitchDiagramData {
   isSimulating?: boolean; // Animation simulation toggle
 }
 
+export type DiagramTeam = 'blue' | 'red' | 'neutral' | 'goalkeeper';
+export type DiagramPathType = 'pass' | 'movement' | 'dribble';
+
+export interface DiagramPitch {
+  width: number;
+  height: number;
+}
+
+export interface DiagramPlayer {
+  id: string;
+  team: DiagramTeam;
+  role?: string;
+  x: number; // 0 to 100 percentage
+  y: number; // 0 to 100 percentage
+}
+
+export interface DiagramBall {
+  id: string;
+  x: number;
+  y: number;
+}
+
+export interface DiagramCone {
+  id: string;
+  x: number;
+  y: number;
+}
+
+export interface DiagramGoal {
+  id: string;
+  type: 'mini' | 'standard' | string;
+  x: number;
+  y: number;
+  orientation: 'top' | 'bottom' | 'left' | 'right' | string;
+}
+
+export interface DiagramZone {
+  id?: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  label?: string;
+  [key: string]: unknown;
+}
+
+export interface DiagramPath {
+  id: string;
+  type: DiagramPathType;
+  fromPlayerId: string;
+  toPlayerId?: string;
+}
+
+export interface StructuredDrillDiagram {
+  pitch: DiagramPitch;
+  players: DiagramPlayer[];
+  balls: DiagramBall[];
+  cones: DiagramCone[];
+  goals: DiagramGoal[];
+  zones: DiagramZone[];
+  paths: DiagramPath[];
+}
+
 export type GenerationSource = 'gemini' | 'fallback';
 
 export type LeftoverRole = 'none' | 'joker' | 'rotation';
@@ -74,6 +137,7 @@ export interface Exercise {
   howItWorks: string[]; // Step by step rules
   coachingPoints: string[]; // Technical / tactical coaching cues
   pitchDiagram?: PitchDiagramData;
+  diagram?: StructuredDrillDiagram;
   progression?: string;
   playerOrganization?: ExercisePlayerOrganization;
 }

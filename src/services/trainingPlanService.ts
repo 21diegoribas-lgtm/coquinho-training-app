@@ -17,6 +17,7 @@ import { normalizeDurationsToTotal } from './durationUtils';
 import { buildDrillDiagram } from './drillDiagramService';
 import { formatPhaseContent } from './gameFormatContext';
 import { checkGeneratedSession, finalGameTitle } from './sessionConsistency';
+import { buildDefaultStructuredDiagram } from './structuredDiagram';
 
 /**
  * Validates inputs prior to calling the Gemini API
@@ -49,7 +50,7 @@ function durationSplit(duration: number): [number, number, number, number, numbe
   return [15, 15, 20, 20, 20];
 }
 
-function buildLocalFallbackPlan(params: {
+export function buildLocalFallbackPlan(params: {
   players: number;
   trainingFocus: string;
   duration: number;
@@ -136,9 +137,20 @@ function buildLocalFallbackPlan(params: {
         duration: durations[idx],
         players: params.players,
         area: defaultAreas[idx],
-        equipment: ['Bóng', 'Cọc tiêu', 'Áo bib'],
         organization: `${formatPlayerDistribution(params.players, blockType)}. ${spatialSetup}`,
         playerOrganization: org,
+        diagram: buildDefaultStructuredDiagram({
+          blockType,
+          playerCount: params.players,
+          playerOrganization: org,
+          exerciseName: content.exerciseName,
+          topic,
+          organization: `${formatPlayerDistribution(params.players, blockType)}. ${spatialSetup}`,
+          execution: content.execution,
+          equipment: content.equipment,
+          area: defaultAreas[idx],
+          gameFormat: format,
+        }),
         ...content,
       };
     }),
@@ -335,6 +347,18 @@ export function mapGeminiPlanToSession(
       : toPlayerOrganization(phase.players, blockType);
     const playersCount = formatPlayersCount({ ...phase, playerOrganization: org }, blockType);
     const pitchDiagram = generatePitchDiagramForPhase(phase, blockType);
+    const diagram = phase.diagram || buildDefaultStructuredDiagram({
+      blockType,
+      playerCount: phase.players,
+      playerOrganization: org,
+      exerciseName: phase.exerciseName,
+      topic,
+      organization: phase.organization,
+      execution: phase.execution,
+      equipment: phase.equipment,
+      area: phase.area,
+      gameFormat: safePlan.gameFormat as GameFormat,
+    });
 
     return {
       id: phase.id || `drill_${sessionId}_${idx + 1}`,
@@ -351,6 +375,7 @@ export function mapGeminiPlanToSession(
       progression: phase.progression,
       playerOrganization: org,
       pitchDiagram,
+      diagram,
     };
   });
 

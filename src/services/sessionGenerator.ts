@@ -1,6 +1,7 @@
 import { Exercise, GameFormat, SessionDuration, TrainingSession, PitchDiagramData } from '../types/session';
 import { explicitOrganization, formatPlayerDistribution, toPlayerOrganization } from './playerAccounting';
 import { buildDrillDiagram } from './drillDiagramService';
+import { buildDefaultStructuredDiagram } from './structuredDiagram';
 import { formatPhaseContent } from './gameFormatContext';
 import { checkGeneratedSession, finalGameTitle, titleMatchesOrganization } from './sessionConsistency';
 
@@ -1015,6 +1016,13 @@ export function generateTrainingSession(
         equipment: exercise.equipment,
         playerOrganization: exercise.playerOrganization,
         coachingPoints: exercise.coachingPoints,
+      }),
+      diagram: buildDefaultStructuredDiagram({
+        blockType: exercise.blockType,
+        playerCount,
+        playerOrganization: exercise.playerOrganization,
+        exerciseName: exercise.exerciseName,
+        topic: cleanTopic,
       }),
     }));
 
