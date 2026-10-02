@@ -27,10 +27,36 @@ import {
   resolvePathCoordinates,
 } from './structuredDiagram';
 
+/**
+ * Sensible default video bitrate for 1200x720 @ 30fps (TASK D8B2: 4–6 Mbps).
+ */
+export const DEFAULT_VIDEO_BITS_PER_SECOND = 5_000_000; // 5 Mbps
+
+/**
+ * Preferred WebM codec order (TASK D8B2).
+ */
+export const PREFERRED_WEBM_CODECS = [
+  'video/webm;codecs=vp9',
+  'video/webm;codecs=vp8',
+  'video/webm',
+] as const;
+
+/**
+ * Candidate native MP4 mime types for capability detection (TASK D8B2).
+ */
+export const MP4_CANDIDATE_MIMES = [
+  'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+  'video/mp4;codecs=avc1',
+  'video/mp4;codecs=h264',
+  'video/mp4',
+] as const;
+
 export interface VideoExportOptions {
   fps?: number; // Default 30 FPS
   width?: number; // Default 1200
   height?: number; // Default 720 (5:3 aspect ratio matching 1000x600 pitch)
+  videoBitsPerSecond?: number; // Default 5 Mbps
+  audioTrack?: MediaStreamTrack | null; // Foundation for future audio track (TASK D8B2)
   filename?: string;
   topic?: string;
   exerciseName?: string;
@@ -46,6 +72,18 @@ export interface VideoExportProgress {
   stage: 'rendering' | 'encoding' | 'completed' | 'cancelled' | 'error';
 }
 
+export interface VideoExportResult {
+  blob: Blob;
+  mimeType: string;
+  filename: string;
+  duration: number;
+  fps: number;
+  width: number;
+  height: number;
+  frameCount: number;
+  hasAudio: boolean;
+}
+
 export interface PresentationTimelineMapping {
   presentationTime: number;
   drillTime: number;
@@ -59,6 +97,38 @@ export interface PresentationTimelineMapping {
     players: DiagramPlayer[];
     balls: Array<{ id: string; x: number; y: number }>;
   };
+}
+
+export interface CodecSelectionResult {
+  supported: boolean;
+  mimeType?: string;
+  reason?: string;
+}
+
+export interface MediaExportCapability {
+  webm: boolean;
+  webmCodec?: string;
+  mp4Native: boolean;
+  mp4NativeCodec?: string;
+  mp4RequiresTranscode: boolean;
+}
+
+export interface NarrationSlot {
+  id: string;
+  momentId: string;
+  startPresentationTime: number;
+  duration: number;
+  text: string;
+  title: string;
+  playerId: string;
+  event?: string;
+}
+
+export interface ExportPreconditionsValidation {
+  valid: boolean;
+  error?: string;
+  mimeType?: string;
+  totalDuration?: number;
 }
 
 /**
@@ -87,6 +157,82 @@ export function generateVideoFilename(topicOrExerciseName?: string): string {
     return `${prefix}-giao-an-tap-luyen.webm`;
   }
   return `${prefix}-${base}.webm`;
+}
+
+/**
+ * Pure helper for selecting the best supported WebM codec in preferred order (TASK D8B2).
+ * Order: 1. video/webm;codecs=vp9, 2. video/webm;codecs=vp8, 3. video/webm.
+ */
+export function selectBestWebMCodec(
+  isTypeSupportedFn?: (mime: string) => boolean
+): CodecSelectionResult {
+  let checkFn = isTypeSupportedFn;
+
+  if (!checkFn && typeof window !== 'undefined' && (window as any).MediaRecorder && typeof (window as any).MediaRecorder.isTypeSupported === 'function') {
+    checkFn = (mime: string) => (window as any).MediaRecorder.isTypeSupported(mime);
+  }
+
+  if (!checkFn) {
+    return {
+      supported: false,
+      reason: 'MediaRecorder.isTypeSupported không khả dụng trong môi trường này',
+    };
+  }
+
+  for (const candidate of PREFERRED_WEBM_CODECS) {
+    try {
+      if (checkFn(candidate)) {
+        return { supported: true, mimeType: candidate };
+      }
+    } catch {}
+  }
+
+  return {
+    supported: false,
+    reason: 'Không tìm thấy định dạng codec WebM phù hợp (yêu cầu VP9, VP8 hoặc WebM tiêu chuẩn)',
+  };
+}
+
+/**
+ * Pure helper for evaluating MP4 capability and transcoding strategy (TASK D8B2).
+ */
+export function evaluateMediaExportCapability(
+  isTypeSupportedFn?: (mime: string) => boolean
+): MediaExportCapability {
+  let checkFn = isTypeSupportedFn;
+  if (!checkFn && typeof window !== 'undefined' && (window as any).MediaRecorder && typeof (window as any).MediaRecorder.isTypeSupported === 'function') {
+    checkFn = (mime: string) => (window as any).MediaRecorder.isTypeSupported(mime);
+  }
+
+  if (!checkFn) {
+    return {
+      webm: false,
+      mp4Native: false,
+      mp4RequiresTranscode: true,
+    };
+  }
+
+  const webmSelection = selectBestWebMCodec(checkFn);
+  let mp4Native = false;
+  let mp4NativeCodec: string | undefined;
+
+  for (const candidate of MP4_CANDIDATE_MIMES) {
+    try {
+      if (checkFn(candidate)) {
+        mp4Native = true;
+        mp4NativeCodec = candidate;
+        break;
+      }
+    } catch {}
+  }
+
+  return {
+    webm: webmSelection.supported,
+    webmCodec: webmSelection.mimeType,
+    mp4Native,
+    mp4NativeCodec,
+    mp4RequiresTranscode: !mp4Native,
+  };
 }
 
 /**
@@ -145,7 +291,7 @@ export function getExportCoachingMoments(
 }
 
 /**
- * Pure helper to calculate total presentation/export video duration (TASK D8B1).
+ * Pure helper to calculate total presentation/export video duration (TASK D8B1/D8B2).
  * Total duration = animation.duration + sum of presentation durations for all active coaching moments.
  * Does not mutate animation.duration.
  */
@@ -159,6 +305,15 @@ export function calculateExportDuration(
   const exportMoments = getExportCoachingMoments(animation);
   const coachingDuration = exportMoments.reduce((sum, m) => sum + (m.duration || 0), 0);
   return Math.round((animation.duration + coachingDuration) * 100) / 100;
+}
+
+/**
+ * Pure helper for calculating presentation time derived from frame index (TASK D8B2).
+ * Prevents drift if frame rendering itself is slow.
+ */
+export function calculateFramePresentationTime(frameIndex: number, fps = 30): number {
+  const safeFps = fps > 0 ? fps : 30;
+  return Math.max(0, Math.round((frameIndex / safeFps) * 1000) / 1000);
 }
 
 /**
@@ -276,6 +431,109 @@ export function mapPresentationTimeToTimeline(
 }
 
 /**
+ * Pure helper that maps coaching moments to presentation-time narration slots (TASK D8B2).
+ * Begins during the hold phase of the coaching moment presentation (after camera enter transition completes).
+ * Does not overlap and follows presentation time.
+ */
+export function buildNarrationTimeline(
+  animation: DiagramAnimation | null | undefined,
+  totalExportDuration?: number
+): NarrationSlot[] {
+  if (!animation) return [];
+  const exportMoments = getExportCoachingMoments(animation);
+  if (exportMoments.length === 0) return [];
+
+  const slots: NarrationSlot[] = [];
+  let currentPresCursor = 0;
+  let prevDrillTime = 0;
+
+  for (let i = 0; i < exportMoments.length; i++) {
+    const m = exportMoments[i];
+    const drillRun = Math.max(0, m.time - prevDrillTime);
+    currentPresCursor += drillRun;
+    prevDrillTime = m.time;
+
+    // Coaching moment presentation begins at currentPresCursor
+    // Hold phase starts after enter transition (~25% into duration, min 0.2s, max 0.6s)
+    const enterDelay = Math.max(0.2, Math.min(0.6, Math.round(m.duration * 0.25 * 100) / 100));
+    const startPresentationTime = Math.round((currentPresCursor + enterDelay) * 100) / 100;
+
+    // Duration covers the hold window (~65% of moment presentation time)
+    const slotDuration = Math.max(0.5, Math.round((m.duration - enterDelay - 0.2) * 100) / 100);
+
+    slots.push({
+      id: `narr-${m.id || i + 1}`,
+      momentId: m.id,
+      startPresentationTime,
+      duration: slotDuration,
+      text: m.text,
+      title: m.title,
+      playerId: m.playerId,
+      event: m.event,
+    });
+
+    currentPresCursor += m.duration;
+  }
+
+  return slots;
+}
+
+/**
+ * Lightweight pre-flight validation before starting export (TASK D8B2).
+ */
+export function validateExportPreconditions(
+  diagram: StructuredDrillDiagram | null | undefined,
+  options: VideoExportOptions = {},
+  isTypeSupportedFn?: (mime: string) => boolean
+): ExportPreconditionsValidation {
+  if (!diagram || typeof diagram !== 'object') {
+    return { valid: false, error: 'Sơ đồ bài tập không hợp lệ' };
+  }
+
+  if (diagram.animation && typeof diagram.animation.duration === 'number' && diagram.animation.duration <= 0) {
+    return { valid: false, error: 'Thời lượng hoạt ảnh bài tập phải lớn hơn 0 giây' };
+  }
+
+  const anim = diagram.animation && Array.isArray(diagram.animation.steps) && diagram.animation.steps.length > 0
+    ? diagram.animation
+    : buildSemanticAnimation(diagram);
+
+  if (!anim || typeof anim.duration !== 'number' || anim.duration <= 0) {
+    return { valid: false, error: 'Thời lượng hoạt ảnh bài tập phải lớn hơn 0 giây' };
+  }
+
+  const totalDuration = calculateExportDuration(anim);
+  if (totalDuration <= 0) {
+    return { valid: false, error: 'Tổng thời lượng video xuất ra phải lớn hơn 0 giây' };
+  }
+
+  const width = options.width ?? 1200;
+  const height = options.height ?? 720;
+  if (width < 320 || height < 200 || width > 3840 || height > 2160) {
+    return { valid: false, error: `Kích thước khung hình không hợp lệ (${width}x${height})` };
+  }
+
+  const fps = options.fps ?? 30;
+  if (fps < 10 || fps > 60) {
+    return { valid: false, error: `Tốc độ khung hình (FPS: ${fps}) phải từ 10 đến 60 FPS` };
+  }
+
+  const codecResult = selectBestWebMCodec(isTypeSupportedFn);
+  if (!codecResult.supported || !codecResult.mimeType) {
+    return {
+      valid: false,
+      error: codecResult.reason || 'Trình duyệt không hỗ trợ các codec WebM cần thiết (VP9/VP8)',
+    };
+  }
+
+  return {
+    valid: true,
+    mimeType: codecResult.mimeType,
+    totalDuration,
+  };
+}
+
+/**
  * Escapes XML strings for safe insertion into SVG documents.
  */
 function escapeXml(str: string): string {
@@ -290,10 +548,6 @@ function escapeXml(str: string): string {
 
 /**
  * Pure helper to render a single frame of the tactical board and coaching presentation as a standalone SVG string.
- * Uses a nested SVG architecture:
- * - Outer SVG (1200x720): fixed viewport
- * - Tactical Board Layer: zoomed and panned by cameraViewBox
- * - Overlay Layer: fixed screen coordinates for the coaching card so it is never distorted or zoomed out
  */
 export function renderDiagramFrameToSvgString(
   diagram: StructuredDrillDiagram,
@@ -553,29 +807,25 @@ export function isBrowserVideoExportSupported(): {
     };
   }
 
-  const MR = (window as any).MediaRecorder;
-  const candidateTypes = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
-
-  for (const mimeType of candidateTypes) {
-    if (typeof MR.isTypeSupported === 'function' && MR.isTypeSupported(mimeType)) {
-      return { supported: true, mimeType };
-    }
-  }
-
-  return {
-    supported: false,
-    reason: 'Trình duyệt không hỗ trợ định dạng video/webm trong MediaRecorder',
-  };
+  return selectBestWebMCodec();
 }
 
 /**
- * Triggers a native browser file download from a Blob.
+ * Schedules the cleanup/revocation of a Blob URL after a safe delay (TASK D8B2).
+ * Prevents premature revocation while native browser download is still initializing.
  */
-export function triggerVideoDownload(blob: Blob, filename: string): void {
+export function scheduleBlobUrlCleanup(url: string, delayMs = 60_000): void {
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {}
+  }, delayMs);
+}
+
+/**
+ * Triggers a native browser file download from a Blob with safe lifecycle management (TASK D8B2).
+ */
+export function triggerVideoDownload(blob: Blob, filename: string, cleanupDelayMs = 60_000): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -585,19 +835,89 @@ export function triggerVideoDownload(blob: Blob, filename: string): void {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-  }, 1500);
+  scheduleBlobUrlCleanup(url, cleanupDelayMs);
+}
+
+/**
+ * Pure helper for combining video stream with an optional audio track (TASK D8B2).
+ */
+export function combineMediaStreamTracks(
+  videoStream: MediaStream,
+  audioTrack?: MediaStreamTrack | null
+): MediaStream {
+  if (!audioTrack) {
+    return videoStream;
+  }
+  try {
+    const combined = new MediaStream();
+    videoStream.getVideoTracks().forEach((vt) => combined.addTrack(vt));
+    combined.addTrack(audioTrack);
+    return combined;
+  } catch {
+    return videoStream;
+  }
+}
+
+/**
+ * Safely stops MediaRecorder and releases stream tracks avoiding race conditions (TASK D8B2).
+ */
+export function safeStopMediaRecorder(
+  recorder: any,
+  stream: MediaStream | null,
+  timeoutMs = 5000
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (!recorder || recorder.state === 'inactive') {
+      if (stream) {
+        stream.getTracks().forEach((t) => {
+          try { t.stop(); } catch {}
+        });
+      }
+      return resolve();
+    }
+
+    let isDone = false;
+    const finish = () => {
+      if (isDone) return;
+      isDone = true;
+      if (stream) {
+        stream.getTracks().forEach((t) => {
+          try { t.stop(); } catch {}
+        });
+      }
+      resolve();
+    };
+
+    const timer = setTimeout(finish, timeoutMs);
+
+    const prevOnStop = recorder.onstop;
+    recorder.onstop = (e: any) => {
+      clearTimeout(timer);
+      if (typeof prevOnStop === 'function') {
+        try { prevOnStop(e); } catch {}
+      }
+      finish();
+    };
+
+    try {
+      if (typeof recorder.requestData === 'function' && recorder.state === 'recording') {
+        recorder.requestData();
+      }
+      recorder.stop();
+    } catch {
+      finish();
+    }
+  });
 }
 
 export interface VideoExportController {
   cancel: () => void;
-  promise: Promise<Blob | null>;
+  promise: Promise<VideoExportResult | null>;
 }
 
 /**
  * Deterministically records a structured drill diagram animation into a WebM video Blob.
- * Stepping through frames using deterministic timeline mapping at 30 FPS.
+ * Hardened with D8B2 reliability, bitrate selection, final-frame capture, and audio foundation.
  */
 export function exportDiagramToVideoBlob(
   diagram: StructuredDrillDiagram,
@@ -605,14 +925,14 @@ export function exportDiagramToVideoBlob(
 ): VideoExportController {
   let isCancelled = false;
   let recorder: any = null;
-  let stream: MediaStream | null = null;
+  let finalStream: MediaStream | null = null;
   let triggerCancelCallback: (() => void) | null = null;
 
-  const promise = new Promise<Blob | null>(async (resolve, reject) => {
-    // 1. Detect browser recording support
-    const support = isBrowserVideoExportSupported();
-    if (!support.supported) {
-      return reject(new Error(support.reason || 'Trình duyệt không hỗ trợ quay video WebM'));
+  const promise = new Promise<VideoExportResult | null>(async (resolve, reject) => {
+    // 1. Pre-flight quality validation (TASK D8B2)
+    const validation = validateExportPreconditions(diagram, options);
+    if (!validation.valid) {
+      return reject(new Error(validation.error || 'Kiểm tra điều kiện xuất video không thành công'));
     }
 
     const animation =
@@ -620,15 +940,13 @@ export function exportDiagramToVideoBlob(
         ? diagram.animation
         : buildSemanticAnimation(diagram);
 
-    if (!animation || animation.duration <= 0) {
-      return reject(new Error('Sơ đồ bài tập không có hoạt ảnh mô phỏng để xuất video'));
-    }
-
     const fps = options.fps ?? 30;
     const width = options.width ?? 1200;
     const height = options.height ?? 720;
-    const totalDuration = calculateExportDuration(animation);
+    const totalDuration = validation.totalDuration || calculateExportDuration(animation);
     const totalFrames = Math.max(1, Math.round(totalDuration * fps));
+    const mimeType = validation.mimeType || 'video/webm';
+    const videoBitsPerSecond = options.videoBitsPerSecond ?? DEFAULT_VIDEO_BITS_PER_SECOND;
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -638,11 +956,21 @@ export function exportDiagramToVideoBlob(
       return reject(new Error('Không thể khởi tạo Canvas 2D context'));
     }
 
+    // 2. Set up MediaStream with optional audio track (TASK D8B2)
     try {
-      stream = canvas.captureStream(fps);
-      const mimeType = support.mimeType || 'video/webm';
+      const rawVideoStream = canvas.captureStream(fps);
+      finalStream = combineMediaStreamTracks(rawVideoStream, options.audioTrack);
       const MR = (window as any).MediaRecorder;
-      recorder = new MR(stream, { mimeType });
+
+      try {
+        recorder = new MR(finalStream, {
+          mimeType,
+          videoBitsPerSecond,
+        });
+      } catch {
+        // Fallback without videoBitsPerSecond if browser rejects bitrate
+        recorder = new MR(finalStream, { mimeType });
+      }
     } catch (err: any) {
       return reject(new Error(`Không thể khởi tạo MediaRecorder: ${err.message || String(err)}`));
     }
@@ -654,12 +982,14 @@ export function exportDiagramToVideoBlob(
       }
     };
 
+    const filename = options.filename || generateVideoFilename(options.exerciseName || options.topic);
+
     const recorderStoppedPromise = new Promise<Blob | null>((res) => {
       recorder.onstop = () => {
         if (isCancelled || chunks.length === 0) {
           res(null);
         } else {
-          const finalBlob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+          const finalBlob = new Blob(chunks, { type: recorder.mimeType || mimeType });
           res(finalBlob);
         }
       };
@@ -673,14 +1003,7 @@ export function exportDiagramToVideoBlob(
 
     triggerCancelCallback = () => {
       isCancelled = true;
-      if (recorder && recorder.state !== 'inactive') {
-        try {
-          recorder.stop();
-        } catch {}
-      }
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
-      }
+      safeStopMediaRecorder(recorder, finalStream);
       options.onProgress?.({
         presentationTime: 0,
         totalDuration,
@@ -692,7 +1015,7 @@ export function exportDiagramToVideoBlob(
       resolve(null);
     };
 
-    // Frame rendering loop
+    // 3. Deterministic frame pacing loop (TASK D8B2: presentationTime derived from frame index)
     const frameIntervalMs = 1000 / fps;
     const img = new Image();
 
@@ -700,7 +1023,8 @@ export function exportDiagramToVideoBlob(
       for (let frame = 0; frame <= totalFrames; frame++) {
         if (isCancelled) break;
 
-        const presentationTime = Math.min(totalDuration, frame / fps);
+        // Presentation time derived from frame index (prevents drift if rendering is slow)
+        const presentationTime = Math.min(totalDuration, calculateFramePresentationTime(frame, fps));
         const mapping = mapPresentationTimeToTimeline(presentationTime, animation, diagram);
         const svgString = renderDiagramFrameToSvgString(diagram, mapping, width, height);
 
@@ -739,6 +1063,9 @@ export function exportDiagramToVideoBlob(
         return;
       }
 
+      // 4. Final Frame Safety: Hold final frame slightly so recorder captures final frame (TASK D8B2)
+      await new Promise((r) => setTimeout(r, frameIntervalMs * 1.5));
+
       options.onProgress?.({
         presentationTime: totalDuration,
         totalDuration,
@@ -748,12 +1075,8 @@ export function exportDiagramToVideoBlob(
         stage: 'encoding',
       });
 
-      if (recorder.state !== 'inactive') {
-        recorder.stop();
-      }
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
-      }
+      // 5. Harden shutdown (TASK D8B2)
+      await safeStopMediaRecorder(recorder, finalStream);
 
       const resultBlob = await recorderStoppedPromise;
       if (isCancelled || !resultBlob) {
@@ -767,17 +1090,24 @@ export function exportDiagramToVideoBlob(
           totalFrames,
           stage: 'completed',
         });
-        resolve(resultBlob);
+
+        // 6. Return rich export result metadata (TASK D8B2)
+        const exportResult: VideoExportResult = {
+          blob: resultBlob,
+          mimeType: recorder.mimeType || mimeType,
+          filename,
+          duration: totalDuration,
+          fps,
+          width,
+          height,
+          frameCount: totalFrames + 1,
+          hasAudio: Boolean(options.audioTrack),
+        };
+
+        resolve(exportResult);
       }
     } catch (err: any) {
-      if (recorder && recorder.state !== 'inactive') {
-        try {
-          recorder.stop();
-        } catch {}
-      }
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
-      }
+      await safeStopMediaRecorder(recorder, finalStream);
       options.onProgress?.({
         presentationTime: 0,
         totalDuration,
@@ -801,18 +1131,19 @@ export function exportDiagramToVideoBlob(
 
 /**
  * High-level function that runs video export and immediately triggers browser file download.
+ * Returns export controller with promise resolving boolean success.
  */
 export function exportAndDownloadDiagramVideo(
   diagram: StructuredDrillDiagram,
   options: VideoExportOptions = {}
 ): { cancel: () => void; promise: Promise<boolean> } {
   const filename = options.filename || generateVideoFilename(options.exerciseName || options.topic);
-  const controller = exportDiagramToVideoBlob(diagram, options);
+  const controller = exportDiagramToVideoBlob(diagram, { ...options, filename });
 
   const promise = controller.promise
-    .then((blob) => {
-      if (!blob) return false;
-      triggerVideoDownload(blob, filename);
+    .then((result) => {
+      if (!result) return false;
+      triggerVideoDownload(result.blob, result.filename);
       return true;
     })
     .catch((err) => {
