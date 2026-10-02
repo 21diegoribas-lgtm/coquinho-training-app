@@ -13,6 +13,7 @@ import {
   DiagramAnimationStep,
   DiagramBall,
   DiagramCoachingMoment,
+  DiagramCoachingSequence,
   DiagramCone,
   DiagramCoordinate,
   DiagramGoal,
@@ -24,6 +25,7 @@ import {
   ExercisePlayerOrganization,
   GameFormat,
   PlayerMoveAction,
+  SemanticCoachingEvent,
   StructuredDrillDiagram,
 } from '../types/session';
 
@@ -447,6 +449,61 @@ export function validateDiagramAnimation(
     }
   }
 
+  // 4. Coaching Sequence (TASK D7A)
+  if (anim.coachingSequence !== undefined) {
+    if (!anim.coachingSequence || typeof anim.coachingSequence !== 'object') {
+      errors.push('Animation coachingSequence must be a non-null object');
+    } else {
+      const seq = anim.coachingSequence as Record<string, unknown>;
+      if (typeof seq.id !== 'string' || !seq.id.trim()) {
+        errors.push('Coaching sequence missing non-empty id');
+      }
+      if (typeof seq.title !== 'string') {
+        errors.push('Coaching sequence title must be a string');
+      }
+      if (!Array.isArray(seq.momentIds)) {
+        errors.push('Coaching sequence momentIds must be an array of moment IDs');
+      } else {
+        const momentsMap = new Map<string, { time: number }>();
+        if (Array.isArray(anim.coachingMoments)) {
+          anim.coachingMoments.forEach((cm) => {
+            if (cm && typeof cm === 'object') {
+              const item = cm as Record<string, unknown>;
+              if (typeof item.id === 'string' && item.id.trim()) {
+                momentsMap.set(item.id.trim(), { time: Number(item.time) || 0 });
+              }
+            }
+          });
+        }
+        const seenSeqIds = new Set<string>();
+        let prevTime = -Infinity;
+        seq.momentIds.forEach((mId, mIdx) => {
+          if (typeof mId !== 'string' || !mId.trim()) {
+            errors.push(`Coaching sequence momentIds[${mIdx}] must be a non-empty string`);
+            return;
+          }
+          const cleanId = mId.trim();
+          if (seenSeqIds.has(cleanId)) {
+            errors.push(`Coaching sequence contains duplicate moment ID: '${cleanId}'`);
+          } else {
+            seenSeqIds.add(cleanId);
+          }
+          const momentData = momentsMap.get(cleanId);
+          if (!momentData) {
+            errors.push(`Coaching sequence references non-existent coaching moment ID: '${cleanId}'`);
+          } else {
+            if (momentData.time < prevTime) {
+              errors.push(
+                `Coaching sequence momentIds must be in chronological order ('${cleanId}' time ${momentData.time} is earlier than previous ${prevTime})`
+              );
+            }
+            prevTime = momentData.time;
+          }
+        });
+      }
+    }
+  }
+
   return { ok: errors.length === 0, errors };
 }
 
@@ -714,6 +771,19 @@ export function filterValidCoachingMoments(
     const orientation = m.orientation !== undefined ? Math.round(m.orientation) : undefined;
     const highlight = m.highlight !== undefined ? Boolean(m.highlight) : true;
 
+    const VALID_SEMANTIC_EVENTS = new Set<string>([
+      'preReceive',
+      'receive',
+      'firstTouch',
+      'moveAfterReceive',
+      'pass',
+      'dribble',
+      'supportMove',
+    ]);
+    const event = typeof m.event === 'string' && VALID_SEMANTIC_EVENTS.has(m.event.trim())
+      ? (m.event.trim() as SemanticCoachingEvent)
+      : undefined;
+
     seenIds.add(id);
     valid.push({
       id,
@@ -722,6 +792,7 @@ export function filterValidCoachingMoments(
       playerId,
       title,
       text,
+      event,
       focus: { zoom },
       highlight,
       orientation,
@@ -729,6 +800,386 @@ export function filterValidCoachingMoments(
   }
 
   return valid;
+}
+
+export interface ClassifiedSemanticEvent {
+  event: SemanticCoachingEvent;
+  playerId: string;
+  time: number;
+  duration?: number;
+  stepId: string;
+  actionIndex: number;
+  receiverId?: string;
+  passerId?: string;
+  targetCoord?: DiagramCoordinate;
+  description?: string;
+}
+
+/**
+ * Pure helper that classifies useful semantic events from animation steps,
+ * ballPass, playerMove, ballDribble, receiver identity, and next actions.
+ */
+export function classifySemanticEvents(
+  animation: DiagramAnimation,
+  diagram?: Pick<StructuredDrillDiagram, 'players' | 'paths'>
+): ClassifiedSemanticEvent[] {
+  const events: ClassifiedSemanticEvent[] = [];
+  const steps = Array.isArray(animation?.steps) ? animation.steps : [];
+  if (steps.length === 0) return events;
+
+  const passArrivals: Array<{
+    passerId: string;
+    receiverId: string;
+    ballId: string;
+    stepStart: number;
+    stepDuration: number;
+    arrivalSec: number;
+    stepId: string;
+  }> = [];
+
+  steps.forEach((step, sIdx) => {
+    const actions = Array.isArray(step.actions) ? step.actions : [];
+    actions.forEach((act, aIdx) => {
+      if (act.type === 'ballPass') {
+        const arrivalSec = Math.round((step.start + step.duration) * 10) / 10;
+        passArrivals.push({
+          passerId: act.fromPlayerId,
+          receiverId: act.toPlayerId,
+          ballId: act.ballId,
+          stepStart: step.start,
+          stepDuration: step.duration,
+          arrivalSec,
+          stepId: step.id || `step-${sIdx + 1}`,
+        });
+
+        // 1. Passer executes 'pass' event
+        events.push({
+          event: 'pass',
+          playerId: act.fromPlayerId,
+          time: step.start,
+          duration: step.duration,
+          stepId: step.id || `step-${sIdx + 1}`,
+          actionIndex: aIdx,
+          passerId: act.fromPlayerId,
+          receiverId: act.toPlayerId,
+          description: `Chuyền bóng cho ${act.toPlayerId}`,
+        });
+
+        // 2. Receiver preReceive event (~75% into pass travel)
+        const preReceiveTime = Math.max(
+          step.start,
+          Math.round((step.start + step.duration * 0.75) * 10) / 10
+        );
+        events.push({
+          event: 'preReceive',
+          playerId: act.toPlayerId,
+          time: preReceiveTime,
+          duration: Math.max(0.3, Math.round((arrivalSec - preReceiveTime) * 10) / 10),
+          stepId: step.id || `step-${sIdx + 1}`,
+          actionIndex: aIdx,
+          passerId: act.fromPlayerId,
+          receiverId: act.toPlayerId,
+          description: `Quan sát và kiểm tra vai trước khi đón bóng từ ${act.fromPlayerId}`,
+        });
+
+        // 3. Receiver receive event at arrival
+        events.push({
+          event: 'receive',
+          playerId: act.toPlayerId,
+          time: arrivalSec,
+          duration: 0.5,
+          stepId: step.id || `step-${sIdx + 1}`,
+          actionIndex: aIdx,
+          passerId: act.fromPlayerId,
+          receiverId: act.toPlayerId,
+          description: `Đón bóng bằng tư thế mở thân người`,
+        });
+      }
+    });
+  });
+
+  steps.forEach((step, sIdx) => {
+    const actions = Array.isArray(step.actions) ? step.actions : [];
+    actions.forEach((act, aIdx) => {
+      if (act.type === 'ballDribble') {
+        const priorPass = passArrivals.find(
+          (p) => p.receiverId === act.playerId && Math.abs(p.arrivalSec - step.start) <= 1.0
+        );
+        if (priorPass) {
+          events.push({
+            event: 'firstTouch',
+            playerId: act.playerId,
+            time: step.start,
+            duration: Math.min(0.8, step.duration),
+            stepId: step.id || `step-${sIdx + 1}`,
+            actionIndex: aIdx,
+            targetCoord: act.to,
+            description: `Chạm bước một định hướng`,
+          });
+          if (step.duration > 1.0) {
+            events.push({
+              event: 'dribble',
+              playerId: act.playerId,
+              time: Math.round((step.start + 0.8) * 10) / 10,
+              duration: step.duration - 0.8,
+              stepId: step.id || `step-${sIdx + 1}`,
+              actionIndex: aIdx,
+              targetCoord: act.to,
+              description: `Dẫn bóng về phía trước`,
+            });
+          }
+        } else {
+          events.push({
+            event: 'dribble',
+            playerId: act.playerId,
+            time: step.start,
+            duration: step.duration,
+            stepId: step.id || `step-${sIdx + 1}`,
+            actionIndex: aIdx,
+            targetCoord: act.to,
+            description: `Dẫn bóng`,
+          });
+        }
+      } else if (act.type === 'playerMove') {
+        const priorPass = passArrivals.find(
+          (p) => p.receiverId === act.playerId && step.start >= p.arrivalSec - 0.2
+        );
+        if (priorPass) {
+          events.push({
+            event: 'moveAfterReceive',
+            playerId: act.playerId,
+            time: step.start,
+            duration: step.duration,
+            stepId: step.id || `step-${sIdx + 1}`,
+            actionIndex: aIdx,
+            targetCoord: act.to,
+            description: `Di chuyển sau khi nhận bóng`,
+          });
+        } else {
+          events.push({
+            event: 'supportMove',
+            playerId: act.playerId,
+            time: step.start,
+            duration: step.duration,
+            stepId: step.id || `step-${sIdx + 1}`,
+            actionIndex: aIdx,
+            targetCoord: act.to,
+            description: `Di chuyển hỗ trợ cự ly và tạo góc chuyền`,
+          });
+        }
+      }
+    });
+  });
+
+  return events.sort((a, b) => a.time - b.time);
+}
+
+export interface PrioritizeMomentsOptions {
+  objective?: string;
+  minSpacing?: number; // Target: ~0.8–1.2 seconds, default 0.8
+  maxMoments?: number; // Maximum 4, default 4
+  preferredCount?: number; // Preferred: 2–3
+}
+
+/**
+ * Calculates domain priority score for a coaching moment candidate.
+ */
+export function calculateMomentPriority(
+  moment: DiagramCoachingMoment,
+  objective?: string
+): number {
+  const obj = (objective || '').toLowerCase();
+  let score = 40;
+
+  switch (moment.event) {
+    case 'preReceive':
+      score = 85;
+      break;
+    case 'receive':
+      score = 80;
+      break;
+    case 'firstTouch':
+      score = 75;
+      break;
+    case 'moveAfterReceive':
+      score = 65;
+      break;
+    case 'supportMove':
+      score = 55;
+      break;
+    case 'dribble':
+      score = 50;
+      break;
+    case 'pass':
+      score = 50;
+      break;
+    default:
+      score = 45;
+  }
+
+  const isReceivingTopic = /nhận bóng|mở thân|quan sát|kiểm tra vai|bước một|half-turn|scan/i.test(obj);
+  const isPassingTopic = /chuyền bóng|phối hợp|người thứ 3|pass/i.test(obj);
+  const isDribbleTopic = /1v1|rê bóng|qua người|dẫn bóng/i.test(obj);
+  const isPressingTopic = /pressing|áp sát|đoạt bóng/i.test(obj);
+
+  if (isReceivingTopic) {
+    if (moment.event === 'preReceive') score += 50;
+    else if (moment.event === 'receive') score += 45;
+    else if (moment.event === 'firstTouch') score += 40;
+    else if (moment.event === 'moveAfterReceive') score += 20;
+  } else if (isPassingTopic) {
+    if (moment.event === 'pass') score += 50;
+    else if (moment.event === 'supportMove') score += 40;
+    else if (moment.event === 'receive') score += 30;
+  } else if (isDribbleTopic) {
+    if (moment.event === 'dribble') score += 50;
+    else if (moment.event === 'firstTouch') score += 40;
+  } else if (isPressingTopic) {
+    if (moment.event === 'supportMove') score += 40;
+  }
+
+  const textContent = `${moment.title} ${moment.text}`.toLowerCase();
+  if (/kiểm tra vai|scan/i.test(textContent) && /quan sát|kiểm tra vai|scan/i.test(obj)) {
+    score += 15;
+  }
+  if (/mở thân/i.test(textContent) && /mở/i.test(obj)) {
+    score += 15;
+  }
+  if (/bước một|định hướng/i.test(textContent) && /bước một|định hướng/i.test(obj)) {
+    score += 15;
+  }
+
+  return score;
+}
+
+/**
+ * Pure helper that selects the strongest coaching moments based on priority,
+ * session objective relevance, deduplication, and minimum spacing.
+ * Rules:
+ * - Preferred: 2–3 moments
+ * - Maximum: 4 moments
+ * - Spacing: target ~0.8–1.2 seconds between moments
+ * - If moments are too close: keep the higher-priority one
+ */
+export function prioritizeCoachingMoments(
+  candidates: DiagramCoachingMoment[],
+  options?: PrioritizeMomentsOptions
+): DiagramCoachingMoment[] {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+  const minSpacing = typeof options?.minSpacing === 'number' && options.minSpacing > 0 ? options.minSpacing : 0.8;
+  const maxMoments = typeof options?.maxMoments === 'number' && options.maxMoments > 0 ? options.maxMoments : 4;
+  const objective = options?.objective;
+
+  // 1. Calculate priority score for each candidate
+  const scored = candidates.map((m, idx) => ({
+    moment: m,
+    score: calculateMomentPriority(m, objective),
+    index: idx,
+  }));
+
+  // 2. Sort candidates by score descending, then earlier time
+  scored.sort((a, b) => b.score - a.score || a.moment.time - b.moment.time);
+
+  // 3. Greedily select moments enforcing minimum spacing and deduplicating ideas & timestamps
+  const selected: typeof scored = [];
+  const seenEventsPerPlayer = new Set<string>();
+
+  for (const item of scored) {
+    const m = item.moment;
+
+    // Avoid duplicate ideas on the same player
+    const eventKey = `${m.playerId}-${m.event || m.title}`;
+    if (m.event && seenEventsPerPlayer.has(eventKey)) {
+      continue;
+    }
+
+    // Check minimum spacing against already accepted higher-priority moments
+    const hasConflict = selected.some(
+      (accepted) => Math.abs(accepted.moment.time - m.time) < minSpacing
+    );
+
+    if (!hasConflict) {
+      selected.push(item);
+      if (m.event) seenEventsPerPlayer.add(eventKey);
+      if (selected.length >= maxMoments) break;
+    }
+  }
+
+  // 4. Sort selected moments strictly chronologically
+  selected.sort((a, b) => a.moment.time - b.moment.time);
+
+  return selected.map((s) => s.moment);
+}
+
+/**
+ * Sanitizes and validates a coachingSequence reference list.
+ * Rules:
+ * - momentIds must reference valid coachingMoment IDs
+ * - be chronological
+ * - contain no duplicates
+ * - ignore invalid references safely
+ */
+export function sanitizeCoachingSequence(
+  sequence: unknown,
+  validMoments: DiagramCoachingMoment[]
+): DiagramCoachingSequence | undefined {
+  if (!sequence || typeof sequence !== 'object') return undefined;
+  const seq = sequence as Record<string, unknown>;
+  const id = typeof seq.id === 'string' && seq.id.trim() ? seq.id.trim() : 'sequence1';
+  const title = typeof seq.title === 'string' && seq.title.trim() ? seq.title.trim() : 'Coaching Sequence';
+
+  if (!Array.isArray(seq.momentIds)) return undefined;
+
+  const momentMap = new Map<string, DiagramCoachingMoment>();
+  (validMoments || []).forEach((m) => {
+    if (m && m.id) momentMap.set(m.id, m);
+  });
+
+  const validIds: string[] = [];
+  const seenIds = new Set<string>();
+
+  for (const rawId of seq.momentIds) {
+    if (typeof rawId !== 'string') continue;
+    const cleanId = rawId.trim();
+    if (!cleanId || seenIds.has(cleanId) || !momentMap.has(cleanId)) {
+      // Ignore invalid references and duplicates safely
+      continue;
+    }
+    seenIds.add(cleanId);
+    validIds.push(cleanId);
+  }
+
+  if (validIds.length === 0) return undefined;
+
+  // Enforce chronological sequence ordering
+  validIds.sort((a, b) => {
+    const timeA = momentMap.get(a)?.time ?? 0;
+    const timeB = momentMap.get(b)?.time ?? 0;
+    return timeA - timeB;
+  });
+
+  return {
+    id,
+    title,
+    momentIds: validIds,
+  };
+}
+
+/**
+ * Builds a valid DiagramCoachingSequence from a set of coaching moments.
+ */
+export function buildCoachingSequence(
+  moments: DiagramCoachingMoment[],
+  title = 'Coaching Sequence',
+  id = 'sequence1'
+): DiagramCoachingSequence | undefined {
+  if (!Array.isArray(moments) || moments.length === 0) return undefined;
+  const sorted = [...moments].sort((a, b) => a.time - b.time);
+  return {
+    id,
+    title,
+    momentIds: sorted.map((m) => m.id),
+  };
 }
 
 /**
@@ -740,7 +1191,7 @@ export function buildSemanticCoachingMoments(
   execution?: string | string[],
   coachingPoints?: string[]
 ): DiagramCoachingMoment[] {
-  const moments: DiagramCoachingMoment[] = [];
+  const candidates: DiagramCoachingMoment[] = [];
   const anim = diagram.animation;
   const steps = anim && Array.isArray(anim.steps) ? anim.steps : [];
   const animDuration = anim && typeof anim.duration === 'number' && anim.duration > 0 ? anim.duration : 8;
@@ -754,7 +1205,9 @@ export function buildSemanticCoachingMoments(
     if (p && p.id) playerMap.set(p.id, p);
   });
 
-  // Find pass actions to place the coaching moment on the receiver
+  const isReceivingOpenBody = /nhận bóng|mở thân|quan sát|kiểm tra vai|half-turn/i.test(textContext);
+
+  // Find pass actions to place coaching moments on receiver
   for (let stepIdx = 0; stepIdx < steps.length; stepIdx++) {
     const step = steps[stepIdx];
     const passAction = step.actions.find((a) => a.type === 'ballPass') as BallPassAction | undefined;
@@ -763,11 +1216,10 @@ export function buildSemanticCoachingMoments(
       const receiverPlayer = playerMap.get(receivingPlayerId);
       const receiverPos = receiverPlayer ? { x: receiverPlayer.x, y: receiverPlayer.y } : { x: 50, y: 30 };
 
-      // Trigger ~75% through the pass travel (shortly before ball reaches receiver)
+      // Trigger preReceive ~75% through the pass travel (shortly before ball reaches receiver)
       const targetTrigger = Math.round((step.start + step.duration * 0.75) * 10) / 10;
       const maxMomentDuration = Math.max(0.5, Math.round((animDuration - targetTrigger) * 10) / 10);
-      const momentDuration = Math.min(2.5, maxMomentDuration);
-      const triggerTime = Math.min(targetTrigger, Math.max(0, Math.round((animDuration - momentDuration) * 10) / 10));
+      const momentDuration = Math.min(2.0, maxMomentDuration);
 
       // Derive orientation from receiver's subsequent action target (TASK D6)
       let nextTargetPos: { x: number; y: number } | null = null;
@@ -814,64 +1266,139 @@ export function buildSemanticCoachingMoments(
         }
       }
 
-      // 3. Compute geometric orientation toward next target or use existing sensible fallback (45°)
+      // 3. Compute geometric orientation toward next target or fallback (45°)
       let orientation = 45;
       if (nextTargetPos) {
         orientation = calculateOrientationFromNextAction(receiverPos, nextTargetPos);
       }
 
-      let title = 'Mở thân người';
-      let text = 'Kiểm tra vai trước khi nhận và mở thân người về hướng tấn công.';
+      if (isReceivingOpenBody) {
+        // Moment 1: preReceive (Kiểm tra vai)
+        if (targetTrigger + 0.5 <= animDuration) {
+          candidates.push({
+            id: 'coach1',
+            time: targetTrigger,
+            duration: Math.min(1.0, momentDuration),
+            playerId: receivingPlayerId,
+            event: 'preReceive',
+            title: 'Kiểm tra vai',
+            text: 'Quan sát phía sau trước khi nhận để biết hướng chơi tiếp.',
+            focus: { zoom: 1.8 },
+            highlight: true,
+            orientation: 45,
+          });
+        }
 
-      if (/bước một|định hướng|không gian trống/i.test(textContext)) {
-        title = 'Chạm bước một định hướng';
-        text = 'Mở góc đón bóng bằng chân xa, định hướng bóng về không gian trống phía trước.';
-      } else if (/quan sát|kiểm tra vai|scan/i.test(textContext)) {
-        title = 'Kiểm tra vai & Mở thân';
-        text = 'Quay đầu kiểm tra vai trước khi nhận bóng để chọn hướng mở thân người thuận lợi.';
+        // Moment 2: receive (Mở thân người) ~1.0s after preReceive
+        const receiveTime = Math.round((targetTrigger + 1.0) * 10) / 10;
+        if (receiveTime + 0.5 <= animDuration) {
+          candidates.push({
+            id: 'coach2',
+            time: receiveTime,
+            duration: Math.min(1.0, Math.max(0.5, Math.round((animDuration - receiveTime) * 10) / 10)),
+            playerId: receivingPlayerId,
+            event: 'receive',
+            title: 'Mở thân người',
+            text: 'Nhận ở góc mở để nhìn thấy bóng và hướng tấn công cùng lúc.',
+            focus: { zoom: 1.8 },
+            highlight: true,
+            orientation,
+          });
+        }
+
+        // Moment 3: firstTouch (Chạm bước một) ~1.0s after receive (if animation duration supports it)
+        const touchTime = Math.round((targetTrigger + 2.0) * 10) / 10;
+        if (touchTime + 0.5 <= animDuration) {
+          candidates.push({
+            id: 'coach3',
+            time: touchTime,
+            duration: Math.min(1.0, Math.max(0.5, Math.round((animDuration - touchTime) * 10) / 10)),
+            playerId: receivingPlayerId,
+            event: 'firstTouch',
+            title: 'Chạm bước một',
+            text: 'Đưa bóng vào khoảng trống giúp hành động tiếp theo nhanh hơn.',
+            focus: { zoom: 1.8 },
+            highlight: true,
+            orientation,
+          });
+        }
+      } else {
+        // Standard single / double moments for other topics
+        let title = 'Mở thân người';
+        let text = 'Kiểm tra vai trước khi nhận và mở thân người về hướng tấn công.';
+
+        if (/bước một|định hướng|không gian trống/i.test(textContext)) {
+          title = 'Chạm bước một định hướng';
+          text = 'Mở góc đón bóng bằng chân xa, định hướng bóng về không gian trống phía trước.';
+        } else if (/quan sát|kiểm tra vai|scan/i.test(textContext)) {
+          title = 'Kiểm tra vai & Mở thân';
+          text = 'Quay đầu kiểm tra vai trước khi nhận bóng để chọn hướng mở thân người thuận lợi.';
+        }
+
+        if (targetTrigger + momentDuration <= animDuration) {
+          candidates.push({
+            id: `coach${candidates.length + 1}`,
+            time: targetTrigger,
+            duration: momentDuration,
+            playerId: receivingPlayerId,
+            event: 'preReceive',
+            title,
+            text,
+            focus: { zoom: 1.8 },
+            highlight: true,
+            orientation,
+          });
+        }
       }
 
-      if (triggerTime + momentDuration <= animDuration) {
-        moments.push({
-          id: `coach-${moments.length + 1}`,
-          time: triggerTime,
-          duration: momentDuration,
-          playerId: receivingPlayerId,
-          title,
-          text,
-          focus: { zoom: 1.8 },
-          highlight: true,
-          orientation,
-        });
-      }
-
-      if (moments.length >= 2) break;
+      if (candidates.length >= 3) break;
     }
   }
 
   // Fallback demo coaching moment if no ballPass found but players exist
-  if (moments.length === 0 && Array.isArray(diagram.players) && diagram.players.length >= 2) {
+  if (candidates.length === 0 && Array.isArray(diagram.players) && diagram.players.length >= 2) {
     const p1 = diagram.players[0];
     const p2 = diagram.players[1];
-    const momentDuration = Math.min(2.5, Math.max(0.5, Math.round(animDuration * 0.35 * 10) / 10));
+    const momentDuration = Math.min(2.0, Math.max(0.5, Math.round(animDuration * 0.35 * 10) / 10));
     const triggerTime = Math.min(1.0, Math.max(0, Math.round((animDuration - momentDuration) * 10) / 10));
     const orientation = calculateOrientationFromNextAction(p2, { x: Math.min(90, p2.x + 20), y: p2.y });
 
-    moments.push({
-      id: 'coach-1',
+    candidates.push({
+      id: 'coach1',
       time: triggerTime,
       duration: momentDuration,
       playerId: p2.id,
-      title: 'Mở thân người',
-      text: 'Kiểm tra vai trước khi nhận và mở thân người về hướng tấn công.',
+      event: 'preReceive',
+      title: 'Kiểm tra vai',
+      text: 'Quan sát phía sau trước khi nhận để biết hướng chơi tiếp.',
       focus: { zoom: 1.8 },
       highlight: true,
       orientation,
     });
+
+    const secondTime = Math.round((triggerTime + 1.0) * 10) / 10;
+    if (secondTime + 0.5 <= animDuration) {
+      candidates.push({
+        id: 'coach2',
+        time: secondTime,
+        duration: Math.min(1.0, Math.round((animDuration - secondTime) * 10) / 10),
+        playerId: p2.id,
+        event: 'receive',
+        title: 'Mở thân người',
+        text: 'Nhận ở góc mở để nhìn thấy bóng và hướng tấn công cùng lúc.',
+        focus: { zoom: 1.8 },
+        highlight: true,
+        orientation,
+      });
+    }
   }
 
-  // Enforce no overlaps and chronological spacing (TASK D6)
-  return resolveCoachingMomentOverlaps(moments, 1.5);
+  // Prioritize moments enforcing minimum spacing (~0.8–1.2s) and max 4 (preferred 2-3)
+  return prioritizeCoachingMoments(candidates, {
+    objective: textContext,
+    minSpacing: 0.8,
+    maxMoments: 4,
+  });
 }
 
 /**
@@ -1110,7 +1637,15 @@ export function buildSemanticAnimation(
     { ...diagram, animation: { duration, steps } },
     execution
   );
-  return { duration, steps, coachingMoments };
+  let coachingSequence: DiagramCoachingSequence | undefined;
+  if (coachingMoments.length >= 2) {
+    const isReceiving = execution && /nhận bóng|mở thân|quan sát|kiểm tra vai/i.test(String(execution));
+    coachingSequence = buildCoachingSequence(
+      coachingMoments,
+      isReceiving ? 'Nhận bóng mở thân người' : 'Chuỗi huấn luyện kỹ thuật'
+    );
+  }
+  return { duration, steps, coachingMoments, ...(coachingSequence ? { coachingSequence } : {}) };
 }
 
 export interface BuildDiagramOptions {
@@ -2112,9 +2647,11 @@ export function buildDefaultStructuredDiagram(options: BuildDiagramOptions): Str
     diag = buildQuadStationDiagram(count, options);
   }
 
+  const contextText = [options.topic, options.exerciseName, options.execution].filter(Boolean).join(' ');
+
   return {
     ...diag,
-    animation: diag.animation || buildSemanticAnimation(diag, options.execution),
+    animation: diag.animation || buildSemanticAnimation(diag, contextText || options.execution),
   };
 }
 
@@ -2140,6 +2677,18 @@ export function safeStructuredDiagram(
     });
 
     if (semanticRes.ok) {
+      const sanitizedMoments = d.animation?.coachingMoments
+        ? filterValidCoachingMoments(
+            d.animation.coachingMoments,
+            new Set(d.players.map((p) => p.id)),
+            d.animation.duration
+          )
+        : undefined;
+
+      const sanitizedSequence = d.animation?.coachingSequence && sanitizedMoments
+        ? sanitizeCoachingSequence(d.animation.coachingSequence, sanitizedMoments)
+        : undefined;
+
       return {
         pitch: {
           width: typeof d.pitch?.width === 'number' && d.pitch.width > 0 ? d.pitch.width : 100,
@@ -2188,13 +2737,8 @@ export function safeStructuredDiagram(
           ? {
               duration: d.animation.duration,
               steps: d.animation.steps,
-              coachingMoments: d.animation.coachingMoments
-                ? filterValidCoachingMoments(
-                    d.animation.coachingMoments,
-                    new Set(d.players.map((p) => p.id)),
-                    d.animation.duration
-                  )
-                : undefined,
+              coachingMoments: sanitizedMoments,
+              coachingSequence: sanitizedSequence,
             }
           : buildSemanticAnimation(d, fallbackOptions.execution),
       };

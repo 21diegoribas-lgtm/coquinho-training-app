@@ -140,6 +140,15 @@ export interface CoachingMomentFocus {
   zoom?: number; // Safe range: 1.0–3.0 (default ~1.6–2.0)
 }
 
+export type SemanticCoachingEvent =
+  | 'preReceive'
+  | 'receive'
+  | 'firstTouch'
+  | 'moveAfterReceive'
+  | 'pass'
+  | 'dribble'
+  | 'supportMove';
+
 export interface DiagramCoachingMoment {
   id: string;
   time: number; // in seconds (animation timeline trigger)
@@ -147,15 +156,23 @@ export interface DiagramCoachingMoment {
   playerId: string;
   title: string;
   text: string;
+  event?: SemanticCoachingEvent;
   focus?: CoachingMomentFocus;
   highlight?: boolean;
   orientation?: number; // 0-359 degrees
+}
+
+export interface DiagramCoachingSequence {
+  id: string;
+  title: string;
+  momentIds: string[];
 }
 
 export interface DiagramAnimation {
   duration: number; // total duration in seconds
   steps: DiagramAnimationStep[];
   coachingMoments?: DiagramCoachingMoment[];
+  coachingSequence?: DiagramCoachingSequence;
 }
 
 export interface StructuredDrillDiagram {

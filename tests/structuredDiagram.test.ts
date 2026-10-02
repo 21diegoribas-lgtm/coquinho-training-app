@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildCoachingSequence,
   buildDefaultStructuredDiagram,
   buildSemanticAnimation,
   buildSemanticCoachingMoments,
   buildWavyPath,
   calculateCameraViewBox,
+  calculateMomentPriority,
   calculateOrientationFromNextAction,
+  classifySemanticEvents,
   clusterDiagramPlayers,
   detectEquipmentGoals,
   easeInOutCubic,
@@ -19,9 +22,11 @@ import {
   interpolateViewBox,
   isOpposedExercise,
   normalizeOrientation,
+  prioritizeCoachingMoments,
   resolveCoachingMomentOverlaps,
   resolvePathCoordinates,
   safeStructuredDiagram,
+  sanitizeCoachingSequence,
   validateDiagramAnimation,
   validateSemanticDiagram,
   validateStructuredDiagram,
@@ -29,7 +34,14 @@ import {
 import { generateRealisticFootballPlan } from '../server';
 import { buildLocalFallbackPlan } from '../src/services/trainingPlanService';
 import { sanitizeGeminiPlan } from '../src/services/planValidation';
-import { DiagramAnimation, DiagramCoachingMoment, DiagramPlayer, StructuredDrillDiagram } from '../src/types/session';
+import {
+  DiagramAnimation,
+  DiagramCoachingMoment,
+  DiagramCoachingSequence,
+  DiagramPlayer,
+  SemanticCoachingEvent,
+  StructuredDrillDiagram,
+} from '../src/types/session';
 
 function validSampleDiagram(): StructuredDrillDiagram {
   return {
@@ -1172,6 +1184,526 @@ test('D6: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 t
   const cleanText = formatCoachingOverlayText(cm.text, 140);
   assert.ok(cleanTitle.length <= 40);
   assert.ok(cleanText.length <= 140);
+});
+
+// =============================================================================
+// TASK D7A TESTS: MULTI-ACTION COACHING SEQUENCES (DATA & SEMANTICS)
+// =============================================================================
+
+test('D7A: classifySemanticEvents classifies events from animation steps (pass, preReceive, receive, firstTouch, moveAfterReceive, supportMove, dribble)', () => {
+  const animation: DiagramAnimation = {
+    duration: 8,
+    steps: [
+      {
+        id: 's1',
+        start: 0,
+        duration: 2.0,
+        actions: [
+          { type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' },
+          { type: 'playerMove', playerId: 'p4', to: { x: 30, y: 40 } }, // support move
+        ],
+      },
+      {
+        id: 's2',
+        start: 2.0,
+        duration: 1.5,
+        actions: [
+          { type: 'ballDribble', ballId: 'b1', playerId: 'p2', to: { x: 70, y: 30 } }, // firstTouch by receiver
+        ],
+      },
+      {
+        id: 's3',
+        start: 3.5,
+        duration: 1.5,
+        actions: [
+          { type: 'playerMove', playerId: 'p2', to: { x: 80, y: 30 } }, // moveAfterReceive by receiver
+        ],
+      },
+    ],
+  };
+
+  const events = classifySemanticEvents(animation);
+  assert.ok(events.length >= 5);
+
+  const eventTypes = events.map((e) => e.event);
+  assert.ok(eventTypes.includes('pass'));
+  assert.ok(eventTypes.includes('preReceive'));
+  assert.ok(eventTypes.includes('receive'));
+  assert.ok(eventTypes.includes('firstTouch'));
+  assert.ok(eventTypes.includes('moveAfterReceive'));
+  assert.ok(eventTypes.includes('supportMove'));
+});
+
+test('D7A: receiving event detection identifies passer, receiver, pre-arrival scanning, and arrival reception', () => {
+  const animation: DiagramAnimation = {
+    duration: 6,
+    steps: [
+      {
+        id: 's1',
+        start: 0,
+        duration: 2.0,
+        actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+      },
+    ],
+  };
+
+  const events = classifySemanticEvents(animation);
+  const passEv = events.find((e) => e.event === 'pass')!;
+  assert.equal(passEv.playerId, 'p1');
+  assert.equal(passEv.receiverId, 'p2');
+  assert.equal(passEv.time, 0);
+
+  const preRecEv = events.find((e) => e.event === 'preReceive')!;
+  assert.equal(preRecEv.playerId, 'p2');
+  assert.equal(preRecEv.passerId, 'p1');
+  assert.equal(preRecEv.time, 1.5); // 75% into the 2s pass travel
+  assert.ok(preRecEv.time < 2.0, 'Pre-receive must precede ball arrival');
+
+  const recEv = events.find((e) => e.event === 'receive')!;
+  assert.equal(recEv.playerId, 'p2');
+  assert.equal(recEv.time, 2.0); // Arrival at 2.0s
+});
+
+test('D7A: moment prioritization scores moments based on session objective and domain hierarchy', () => {
+  const mPreReceive: DiagramCoachingMoment = {
+    id: 'm1',
+    time: 1.0,
+    duration: 1.0,
+    playerId: 'p2',
+    event: 'preReceive',
+    title: 'Kiểm tra vai',
+    text: 'Quan sát phía sau trước khi nhận',
+  };
+
+  const mDribble: DiagramCoachingMoment = {
+    id: 'm2',
+    time: 3.0,
+    duration: 1.0,
+    playerId: 'p2',
+    event: 'dribble',
+    title: 'Dẫn bóng',
+    text: 'Rê bóng về phía trước',
+  };
+
+  // When objective is receiving/open body, preReceive has much higher priority than dribble
+  const scoreReceivingPre = calculateMomentPriority(mPreReceive, 'Nhận bóng mở thân người');
+  const scoreReceivingDribble = calculateMomentPriority(mDribble, 'Nhận bóng mở thân người');
+  assert.ok(scoreReceivingPre > scoreReceivingDribble);
+
+  // When objective is 1v1 dribble, dribble score increases significantly
+  const scoreDribbleObjective = calculateMomentPriority(mDribble, '1v1 qua người rê bóng');
+  assert.ok(scoreDribbleObjective > scoreReceivingDribble);
+});
+
+test('D7A: duplicate removal eliminates duplicate ideas and overlapping timestamps', () => {
+  const candidates: DiagramCoachingMoment[] = [
+    {
+      id: 'c1',
+      time: 1.5,
+      duration: 1.0,
+      playerId: 'p2',
+      event: 'preReceive',
+      title: 'Kiểm tra vai',
+      text: 'Quan sát phía sau',
+    },
+    {
+      id: 'c1_dup',
+      time: 1.55, // Identical / overlapping timestamp
+      duration: 1.0,
+      playerId: 'p2',
+      event: 'preReceive', // Duplicate idea on same player
+      title: 'Kiểm tra vai lần 2',
+      text: 'Trùng lặp ý tưởng',
+    },
+    {
+      id: 'c2',
+      time: 2.5,
+      duration: 1.0,
+      playerId: 'p2',
+      event: 'receive',
+      title: 'Mở thân người',
+      text: 'Đón bóng ở góc mở',
+    },
+  ];
+
+  const prioritized = prioritizeCoachingMoments(candidates, {
+    objective: 'Nhận bóng mở thân người',
+    minSpacing: 0.8,
+  });
+
+  assert.equal(prioritized.length, 2);
+  assert.equal(prioritized[0].id, 'c1');
+  assert.equal(prioritized[1].id, 'c2');
+  assert.ok(!prioritized.some((m) => m.id === 'c1_dup'));
+});
+
+test('D7A: minimum spacing enforces ~0.8–1.2s separation, discarding lower-priority conflicts', () => {
+  const candidates: DiagramCoachingMoment[] = [
+    {
+      id: 'high_priority',
+      time: 1.5,
+      duration: 1.0,
+      playerId: 'p2',
+      event: 'preReceive',
+      title: 'Kiểm tra vai',
+      text: 'Quan sát vai',
+    },
+    {
+      id: 'low_priority_too_close',
+      time: 1.9, // Only 0.4s apart (< 0.8s minSpacing)
+      duration: 1.0,
+      playerId: 'p3',
+      event: 'pass',
+      title: 'Chuyền bóng',
+      text: 'Chuyền thường',
+    },
+    {
+      id: 'well_spaced',
+      time: 2.6, // 1.1s apart (> 0.8s)
+      duration: 1.0,
+      playerId: 'p2',
+      event: 'receive',
+      title: 'Mở thân người',
+      text: 'Mở góc thân người',
+    },
+  ];
+
+  const selected = prioritizeCoachingMoments(candidates, {
+    objective: 'Nhận bóng mở thân người',
+    minSpacing: 0.8,
+  });
+
+  assert.equal(selected.length, 2);
+  assert.equal(selected[0].id, 'high_priority');
+  assert.equal(selected[1].id, 'well_spaced');
+  assert.ok(!selected.some((m) => m.id === 'low_priority_too_close'));
+});
+
+test('D7A: chronological sequence ordering sorts moments chronologically regardless of candidate order', () => {
+  const unorderedCandidates: DiagramCoachingMoment[] = [
+    { id: 'm3', time: 3.5, duration: 1.0, playerId: 'p2', event: 'firstTouch', title: 'T3', text: 'Txt3' },
+    { id: 'm1', time: 1.5, duration: 1.0, playerId: 'p2', event: 'preReceive', title: 'T1', text: 'Txt1' },
+    { id: 'm2', time: 2.5, duration: 1.0, playerId: 'p2', event: 'receive', title: 'T2', text: 'Txt2' },
+  ];
+
+  const ordered = prioritizeCoachingMoments(unorderedCandidates, { minSpacing: 0.8 });
+  assert.equal(ordered.length, 3);
+  assert.equal(ordered[0].id, 'm1');
+  assert.equal(ordered[1].id, 'm2');
+  assert.equal(ordered[2].id, 'm3');
+  assert.ok(ordered[0].time < ordered[1].time);
+  assert.ok(ordered[1].time < ordered[2].time);
+
+  const seq = buildCoachingSequence(ordered, 'Chuỗi kỹ thuật', 'seq-ordered');
+  assert.ok(seq);
+  assert.deepEqual(seq.momentIds, ['m1', 'm2', 'm3']);
+});
+
+test('D7A: sanitizeCoachingSequence handles invalid sequence references and drops missing IDs safely', () => {
+  const validMoments: DiagramCoachingMoment[] = [
+    { id: 'coach1', time: 1.5, duration: 1.0, playerId: 'p2', title: 'T1', text: 'X1' },
+    { id: 'coach2', time: 2.5, duration: 1.0, playerId: 'p2', title: 'T2', text: 'X2' },
+  ];
+
+  // Sequence containing duplicate, non-existent, and unsorted IDs
+  const rawSeq = {
+    id: 'seq1',
+    title: 'Kiểm tra chuỗi',
+    momentIds: ['coach2', 'ghost_id', 'coach1', 'coach2', ''],
+  };
+
+  const sanitized = sanitizeCoachingSequence(rawSeq, validMoments);
+  assert.ok(sanitized);
+  assert.equal(sanitized.id, 'seq1');
+  assert.equal(sanitized.title, 'Kiểm tra chuỗi');
+  // Drops ghost_id, drops duplicate coach2, and sorts chronologically: ['coach1', 'coach2']
+  assert.deepEqual(sanitized.momentIds, ['coach1', 'coach2']);
+
+  // Sequence referencing only invalid IDs returns undefined
+  const emptySeq = sanitizeCoachingSequence({ id: 's2', title: 'Trống', momentIds: ['unknown1', 'unknown2'] }, validMoments);
+  assert.equal(emptySeq, undefined);
+});
+
+test('D7A: maximum 4 moments ceiling is strictly respected even when more candidates exist', () => {
+  const manyCandidates: DiagramCoachingMoment[] = [
+    { id: 'c1', time: 1.0, duration: 0.5, playerId: 'p1', event: 'preReceive', title: 'C1', text: 'T1' },
+    { id: 'c2', time: 2.0, duration: 0.5, playerId: 'p2', event: 'receive', title: 'C2', text: 'T2' },
+    { id: 'c3', time: 3.0, duration: 0.5, playerId: 'p2', event: 'firstTouch', title: 'C3', text: 'T3' },
+    { id: 'c4', time: 4.0, duration: 0.5, playerId: 'p3', event: 'moveAfterReceive', title: 'C4', text: 'T4' },
+    { id: 'c5', time: 5.0, duration: 0.5, playerId: 'p4', event: 'supportMove', title: 'C5', text: 'T5' },
+    { id: 'c6', time: 6.0, duration: 0.5, playerId: 'p1', event: 'pass', title: 'C6', text: 'T6' },
+  ];
+
+  const selected = prioritizeCoachingMoments(manyCandidates, { minSpacing: 0.8, maxMoments: 4 });
+  assert.ok(selected.length <= 4, `Selected moments (${selected.length}) must not exceed maximum 4`);
+  assert.equal(selected.length, 4);
+});
+
+test('D7A: preferred 2–3 moment selection produces a compact, high-value sequence', () => {
+  const diagram: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 30 },
+      { id: 'p2', team: 'blue', x: 50, y: 30 },
+      { id: 'p3', team: 'blue', x: 80, y: 50 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 30 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [
+      { id: 'path1', type: 'pass', fromPlayerId: 'p1', toPlayerId: 'p2' },
+      { id: 'path2', type: 'movement', fromPlayerId: 'p2', toPlayerId: 'p3' },
+    ],
+    animation: {
+      duration: 6,
+      steps: [
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.0,
+          actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+        },
+        {
+          id: 'step2',
+          start: 2.0,
+          duration: 2.0,
+          actions: [{ type: 'playerMove', playerId: 'p2', to: { x: 80, y: 50 } }],
+        },
+      ],
+    },
+  };
+
+  const moments = buildSemanticCoachingMoments(
+    diagram,
+    'Cầu thủ quan sát kiểm tra vai trước khi nhận bóng và mở thân người'
+  );
+
+  assert.ok(moments.length >= 2 && moments.length <= 3, `Expected preferred 2-3 moments, got ${moments.length}`);
+  const seq = buildCoachingSequence(moments, 'Nhận bóng mở thân người');
+  assert.ok(seq);
+  assert.equal(seq.momentIds.length, moments.length);
+});
+
+test('D7A: receiving-open-body sequence produces candidate sequence (preReceive "Kiểm tra vai", receive "Mở thân người", firstTouch "Chạm bước một")', () => {
+  const diagram: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 20 },
+      { id: 'p2', team: 'blue', x: 50, y: 20 },
+      { id: 'p3', team: 'blue', x: 80, y: 50 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 20 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [
+      { id: 'path1', type: 'pass', fromPlayerId: 'p1', toPlayerId: 'p2' },
+      { id: 'path2', type: 'dribble', fromPlayerId: 'p2', toPlayerId: 'p3' },
+    ],
+    animation: {
+      duration: 8,
+      steps: [
+        {
+          id: 's1',
+          start: 0,
+          duration: 2.0,
+          actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+        },
+        {
+          id: 's2',
+          start: 2.0,
+          duration: 3.0,
+          actions: [{ type: 'ballDribble', ballId: 'b1', playerId: 'p2', to: { x: 80, y: 50 } }],
+        },
+      ],
+    },
+  };
+
+  const moments = buildSemanticCoachingMoments(diagram, 'Nhận bóng mở thân người và kiểm tra vai quan sát');
+  assert.equal(moments.length, 3);
+
+  // Moment 1: preReceive
+  assert.equal(moments[0].event, 'preReceive');
+  assert.equal(moments[0].title, 'Kiểm tra vai');
+  assert.equal(moments[0].text, 'Quan sát phía sau trước khi nhận để biết hướng chơi tiếp.');
+  assert.equal(moments[0].playerId, 'p2');
+  assert.equal(moments[0].time, 1.5);
+
+  // Moment 2: receive
+  assert.equal(moments[1].event, 'receive');
+  assert.equal(moments[1].title, 'Mở thân người');
+  assert.equal(moments[1].text, 'Nhận ở góc mở để nhìn thấy bóng và hướng tấn công cùng lúc.');
+  assert.equal(moments[1].playerId, 'p2');
+  assert.equal(moments[1].time, 2.5);
+
+  // Moment 3: firstTouch
+  assert.equal(moments[2].event, 'firstTouch');
+  assert.equal(moments[2].title, 'Chạm bước một');
+  assert.equal(moments[2].text, 'Đưa bóng vào khoảng trống giúp hành động tiếp theo nhanh hơn.');
+  assert.equal(moments[2].playerId, 'p2');
+  assert.equal(moments[2].time, 3.5);
+
+  // Spacing verification
+  assert.ok(Math.abs(moments[1].time - moments[0].time) >= 0.8);
+  assert.ok(Math.abs(moments[2].time - moments[1].time) >= 0.8);
+});
+
+test('D7A: validateDiagramAnimation accepts spec-conforming coachingSequence model and rejects invalid references or out-of-order momentIds', () => {
+  const pList: DiagramPlayer[] = [
+    { id: 'p1', team: 'blue', x: 20, y: 30 },
+    { id: 'p2', team: 'blue', x: 60, y: 30 },
+  ];
+  const bList = [{ id: 'b1', x: 20, y: 30 }];
+
+  const validAnim: DiagramAnimation = {
+    duration: 8,
+    steps: [
+      {
+        id: 's1',
+        start: 0,
+        duration: 2.0,
+        actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+      },
+    ],
+    coachingMoments: [
+      { id: 'coach1', time: 1.5, duration: 1.0, playerId: 'p2', event: 'preReceive', title: 'T1', text: 'X1' },
+      { id: 'coach2', time: 2.5, duration: 1.0, playerId: 'p2', event: 'receive', title: 'T2', text: 'X2' },
+    ],
+    coachingSequence: {
+      id: 'sequence1',
+      title: 'Nhận bóng mở thân người',
+      momentIds: ['coach1', 'coach2'],
+    },
+  };
+
+  const res = validateDiagramAnimation(validAnim, pList, bList);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.errors, []);
+
+  // Reject sequence referencing non-existent moment ID
+  const invalidRefAnim = {
+    ...validAnim,
+    coachingSequence: {
+      id: 'sequence1',
+      title: 'Nhận bóng mở thân người',
+      momentIds: ['coach1', 'nonexistent_moment'],
+    },
+  };
+  const resBadRef = validateDiagramAnimation(invalidRefAnim, pList, bList);
+  assert.equal(resBadRef.ok, false);
+  assert.ok(resBadRef.errors.some((e) => e.includes('references non-existent coaching moment ID')));
+
+  // Reject duplicate IDs in sequence
+  const dupSeqAnim = {
+    ...validAnim,
+    coachingSequence: {
+      id: 'sequence1',
+      title: 'Nhận bóng',
+      momentIds: ['coach1', 'coach1'],
+    },
+  };
+  const resDup = validateDiagramAnimation(dupSeqAnim, pList, bList);
+  assert.equal(resDup.ok, false);
+  assert.ok(resDup.errors.some((e) => e.includes('duplicate moment ID')));
+
+  // Reject out-of-order sequence IDs
+  const outOfOrderAnim = {
+    ...validAnim,
+    coachingSequence: {
+      id: 'sequence1',
+      title: 'Nhận bóng',
+      momentIds: ['coach2', 'coach1'],
+    },
+  };
+  const resOrder = validateDiagramAnimation(outOfOrderAnim, pList, bList);
+  assert.equal(resOrder.ok, false);
+  assert.ok(resOrder.errors.some((e) => e.includes('chronological order')));
+});
+
+test('D7A: D6 compatibility: drills without coachingSequence continue to function unchanged with valid coaching moments', () => {
+  const pList: DiagramPlayer[] = [
+    { id: 'p1', team: 'blue', x: 20, y: 30 },
+    { id: 'p2', team: 'blue', x: 60, y: 30 },
+  ];
+  const bList = [{ id: 'b1', x: 20, y: 30 }];
+
+  // Animation without coachingSequence (pure D6 format)
+  const d6Anim: DiagramAnimation = {
+    duration: 8,
+    steps: [
+      {
+        id: 's1',
+        start: 0,
+        duration: 2.0,
+        actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+      },
+    ],
+    coachingMoments: [
+      { id: 'coach1', time: 1.5, duration: 1.0, playerId: 'p2', title: 'Mở thân người', text: 'Kiểm tra vai' },
+    ],
+  };
+
+  const res = validateDiagramAnimation(d6Anim, pList, bList);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.errors, []);
+  assert.equal(d6Anim.coachingSequence, undefined);
+});
+
+test('D7A: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 technical exercise produces valid semantic sequence (coach1=preReceive, coach2=receive, coach3=firstTouch)', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'technical',
+    playerCount: 16,
+    topic: 'Nhận bóng mở thân người',
+    exerciseName: 'Bài tập chuyền nhận bóng mở thân người 4 trạm',
+    organization: '16 cầu thủ chia thành 4 nhóm 4 tại 4 trạm',
+    execution: 'Cầu thủ p1 chuyền bóng cho p2, p2 quan sát kiểm tra vai mở thân người đón bóng và chạm bước một tịnh tiến về cọc tiêu',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  assert.ok(diag.animation, 'Diagram must have animation');
+  const anim = diag.animation!;
+  assert.ok(anim.duration >= 4, 'Animation duration must be valid');
+  assert.ok(anim.coachingMoments && anim.coachingMoments.length >= 3, 'Must contain 3 connected coaching moments');
+
+  // Verify semantic candidates
+  const [m1, m2, m3] = anim.coachingMoments!;
+
+  // coach1 = preReceive
+  assert.equal(m1.id, 'coach1');
+  assert.equal(m1.event, 'preReceive');
+  assert.equal(m1.title, 'Kiểm tra vai');
+  assert.equal(m1.text, 'Quan sát phía sau trước khi nhận để biết hướng chơi tiếp.');
+
+  // coach2 = receive
+  assert.equal(m2.id, 'coach2');
+  assert.equal(m2.event, 'receive');
+  assert.equal(m2.title, 'Mở thân người');
+  assert.equal(m2.text, 'Nhận ở góc mở để nhìn thấy bóng và hướng tấn công cùng lúc.');
+
+  // coach3 = firstTouch
+  assert.equal(m3.id, 'coach3');
+  assert.equal(m3.event, 'firstTouch');
+  assert.equal(m3.title, 'Chạm bước một');
+  assert.equal(m3.text, 'Đưa bóng vào khoảng trống giúp hành động tiếp theo nhanh hơn.');
+
+  // Verify spacing (~0.8–1.2s)
+  const spacing1 = Math.round((m2.time - m1.time) * 10) / 10;
+  const spacing2 = Math.round((m3.time - m2.time) * 10) / 10;
+  assert.ok(spacing1 >= 0.8 && spacing1 <= 1.2, `Spacing 1 (${spacing1}s) must be in 0.8–1.2s`);
+  assert.ok(spacing2 >= 0.8 && spacing2 <= 1.2, `Spacing 2 (${spacing2}s) must be in 0.8–1.2s`);
+
+  // Verify coaching sequence model
+  assert.ok(anim.coachingSequence, 'Must have coachingSequence model attached');
+  const seq = anim.coachingSequence!;
+  assert.equal(seq.id, 'sequence1');
+  assert.equal(seq.title, 'Nhận bóng mở thân người');
+  assert.deepEqual(seq.momentIds, ['coach1', 'coach2', 'coach3']);
+
+  // Verify validation passes without any errors
+  const valRes = validateDiagramAnimation(anim, diag.players, diag.balls);
+  assert.equal(valRes.ok, true);
+  assert.deepEqual(valRes.errors, []);
 });
 
 
