@@ -185,6 +185,7 @@ export interface StructuredDrillDiagram {
   zones: DiagramZone[];
   paths: DiagramPath[];
   animation?: DiagramAnimation;
+  playerOrganization?: ExercisePlayerOrganization;
 }
 
 export type GenerationSource = 'gemini' | 'fallback';

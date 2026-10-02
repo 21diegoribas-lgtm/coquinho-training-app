@@ -2192,9 +2192,321 @@ export function interpolateAnimationState(
   return { players: updatedPlayers, balls: updatedBalls };
 }
 
+export interface LocalDrillGroup {
+  groupId: string;
+  playerIds: string[];
+  playerPositions: Map<string, DiagramCoordinate>;
+  ballIds: string[];
+  paths: DiagramPath[];
+  center: DiagramCoordinate;
+}
+
+/**
+ * Derives self-contained local groups / stations from a structured drill diagram.
+ * For pair drills, each group contains exactly 2 players with its own local ball and local paths.
+ */
+export function deriveLocalGroups(diagram: StructuredDrillDiagram): LocalDrillGroup[] {
+  const players = Array.isArray(diagram.players) ? diagram.players : [];
+  const balls = Array.isArray(diagram.balls) ? diagram.balls : [];
+  const paths = Array.isArray(diagram.paths) ? diagram.paths : [];
+
+  if (players.length === 0) return [];
+
+  const playerMap = new Map<string, DiagramPlayer>();
+  players.forEach((p) => playerMap.set(p.id, p));
+
+  const pOrg = diagram.playerOrganization;
+  const isExplicitPairDrill = Boolean(pOrg && pOrg.playersPerGroup === 2 && pOrg.groups > 0);
+
+  // Group players by spatial clustering
+  const clusterThreshold = isExplicitPairDrill ? 18 : 20;
+  const rawClusters = clusterDiagramPlayers(players, clusterThreshold);
+
+  // If 1 or 0 clusters found, treat as single global group
+  if (rawClusters.length <= 1) {
+    const center = {
+      x: Math.round((players.reduce((sum, p) => sum + p.x, 0) / players.length) * 10) / 10,
+      y: Math.round((players.reduce((sum, p) => sum + p.y, 0) / players.length) * 10) / 10,
+    };
+    const playerPositions = new Map<string, DiagramCoordinate>();
+    players.forEach((p) => playerPositions.set(p.id, { x: p.x, y: p.y }));
+    return [
+      {
+        groupId: 'group-1',
+        playerIds: players.map((p) => p.id),
+        playerPositions,
+        ballIds: balls.map((b) => b.id),
+        paths: [...paths],
+        center,
+      },
+    ];
+  }
+
+  const parseNum = (id: string) => {
+    const n = parseInt(id.replace(/\D/g, ''), 10);
+    return isNaN(n) ? 999 : n;
+  };
+
+  // Sort clusters deterministically by lowest player numerical ID
+  const sortedClusters = [...rawClusters].sort((cA, cB) => {
+    const minA = Math.min(...cA.map((p) => parseNum(p.id)));
+    const minB = Math.min(...cB.map((p) => parseNum(p.id)));
+    return minA - minB;
+  });
+
+  const assignedBallIds = new Set<string>();
+  const groups: LocalDrillGroup[] = [];
+
+  sortedClusters.forEach((cluster, idx) => {
+    // Sort players in cluster by numerical ID (e.g. p1, p2 or p9, p10)
+    const pIds = cluster.map((p) => p.id).sort((a, b) => parseNum(a) - parseNum(b));
+    const pPositions = new Map<string, DiagramCoordinate>();
+    cluster.forEach((p) => pPositions.set(p.id, { x: p.x, y: p.y }));
+
+    const centerX = Math.round((cluster.reduce((s, p) => s + p.x, 0) / cluster.length) * 10) / 10;
+    const centerY = Math.round((cluster.reduce((s, p) => s + p.y, 0) / cluster.length) * 10) / 10;
+    const center: DiagramCoordinate = { x: centerX, y: centerY };
+
+    // Select the nearby local ball belonging to this station
+    let bestBallId = '';
+    let minDist = Infinity;
+    balls.forEach((b) => {
+      if (assignedBallIds.has(b.id)) return;
+      const d = Math.hypot(b.x - centerX, b.y - centerY);
+      if (d < minDist) {
+        minDist = d;
+        bestBallId = b.id;
+      }
+    });
+
+    const ballIds: string[] = [];
+    if (bestBallId) {
+      assignedBallIds.add(bestBallId);
+      ballIds.push(bestBallId);
+    } else {
+      const fallbackBall = balls.find((b) => !assignedBallIds.has(b.id)) || balls[0];
+      if (fallbackBall) ballIds.push(fallbackBall.id);
+      else ballIds.push(`b${idx + 1}`);
+    }
+
+    // Filter paths belonging to this group
+    const pIdSet = new Set(pIds);
+    let groupPaths = paths.filter((path) => pIdSet.has(path.fromPlayerId));
+
+    // Enforce strict local pair mapping for 2-player groups
+    if (pIds.length === 2) {
+      const [idA, idB] = pIds;
+      groupPaths = groupPaths.map((path) => {
+        if (path.type === 'pass') {
+          const targetTo = path.fromPlayerId === idA ? idB : idA;
+          return { ...path, toPlayerId: targetTo };
+        }
+        return path;
+      });
+    }
+
+    groups.push({
+      groupId: `group-${idx + 1}`,
+      playerIds: pIds,
+      playerPositions: pPositions,
+      ballIds,
+      paths: groupPaths,
+      center,
+    });
+  });
+
+  return groups;
+}
+
+/**
+ * Validates self-contained local groups / stations in a structured diagram.
+ * Verifies:
+ * - Every grouped pass is inside one group (no cross-group pass)
+ * - Every grouped movement is inside that group's local station geometry
+ * - No cross-group player reference
+ * - Local ball belongs near the group and is not shared across distant stations
+ * - No impossible ball teleport between distant stations
+ */
+export function validateGroupedDiagram(diagram: StructuredDrillDiagram): DiagramValidationResult {
+  const errors: string[] = [];
+  if (!diagram || typeof diagram !== 'object') {
+    return { ok: false, errors: ['Diagram must be a non-null object'] };
+  }
+
+  const groups = deriveLocalGroups(diagram);
+  if (groups.length <= 1) {
+    return { ok: true, errors: [] };
+  }
+
+  const playerGroupMap = new Map<string, LocalDrillGroup>();
+  const playerCoordsMap = new Map<string, DiagramCoordinate>();
+  if (Array.isArray(diagram.players)) {
+    diagram.players.forEach((p) => playerCoordsMap.set(p.id, { x: p.x, y: p.y }));
+  }
+
+  for (const g of groups) {
+    for (const pid of g.playerIds) {
+      if (playerGroupMap.has(pid)) {
+        errors.push(`Player '${pid}' is assigned to multiple groups: '${playerGroupMap.get(pid)!.groupId}' and '${g.groupId}'`);
+      }
+      playerGroupMap.set(pid, g);
+    }
+  }
+
+  // 1. Verify static paths
+  const paths = Array.isArray(diagram.paths) ? diagram.paths : [];
+  for (const path of paths) {
+    const fromG = path.fromPlayerId ? playerGroupMap.get(path.fromPlayerId) : undefined;
+    const toG = path.toPlayerId ? playerGroupMap.get(path.toPlayerId) : undefined;
+
+    if (fromG && toG && fromG.groupId !== toG.groupId) {
+      errors.push(
+        `Cross-group player reference in static path '${path.id}': player '${path.fromPlayerId}' in group '${fromG.groupId}' targets player '${path.toPlayerId}' in group '${toG.groupId}'`
+      );
+    }
+
+    if (path.type === 'movement' && fromG && path.toPlayerId) {
+      if (toG && toG.groupId !== fromG.groupId) {
+        errors.push(
+          `Movement target references different group in path '${path.id}': '${path.fromPlayerId}' to '${path.toPlayerId}'`
+        );
+      }
+    }
+  }
+
+  // 2. Local ball ownership: each group must have a ball belonging near the group
+  const balls = Array.isArray(diagram.balls) ? diagram.balls : [];
+  const ballMap = new Map<string, DiagramBall>();
+  balls.forEach((b) => ballMap.set(b.id, b));
+
+  const MAX_BALL_STATION_DISTANCE = 22; // units
+  const assignedBallToGroup = new Map<string, string>();
+
+  for (const g of groups) {
+    if (g.ballIds.length === 0) {
+      errors.push(`Group '${g.groupId}' has no assigned local ball`);
+    } else {
+      for (const bId of g.ballIds) {
+        const ball = ballMap.get(bId);
+        if (!ball) {
+          errors.push(`Group '${g.groupId}' references non-existent ball '${bId}'`);
+          continue;
+        }
+        const dist = Math.hypot(ball.x - g.center.x, ball.y - g.center.y);
+        if (dist > MAX_BALL_STATION_DISTANCE) {
+          errors.push(
+            `Local ball '${bId}' (at ${ball.x}, ${ball.y}) is too far from group '${g.groupId}' center (${g.center.x}, ${g.center.y}), dist=${dist.toFixed(1)}`
+          );
+        }
+        if (assignedBallToGroup.has(bId)) {
+          errors.push(
+            `Ball '${bId}' is shared across multiple groups: '${assignedBallToGroup.get(bId)}' and '${g.groupId}'`
+          );
+        }
+        assignedBallToGroup.set(bId, g.groupId);
+      }
+    }
+  }
+
+  // 3. Animation actions: verify passes, movements, and no ball teleportation
+  const animation = diagram.animation;
+  if (animation && Array.isArray(animation.steps)) {
+    const MAX_STATION_MOVEMENT_RADIUS = 22; // movement must remain inside group's local geometry
+
+    const ballLastKnownPos = new Map<string, DiagramCoordinate>();
+    balls.forEach((b) => ballLastKnownPos.set(b.id, { x: b.x, y: b.y }));
+
+    animation.steps.forEach((step, sIdx) => {
+      const actions = Array.isArray(step.actions) ? step.actions : [];
+      const stepBallUsage = new Map<string, string>();
+
+      for (const a of actions) {
+        if (a.type === 'ballPass') {
+          const fromG = playerGroupMap.get(a.fromPlayerId);
+          const toG = playerGroupMap.get(a.toPlayerId);
+
+          if (!fromG) {
+            errors.push(`Step ${sIdx + 1} ballPass references unassigned player '${a.fromPlayerId}'`);
+          }
+          if (!toG) {
+            errors.push(`Step ${sIdx + 1} ballPass references unassigned player '${a.toPlayerId}'`);
+          }
+          if (fromG && toG && fromG.groupId !== toG.groupId) {
+            errors.push(
+              `Cross-group pass action in step ${sIdx + 1}: player '${a.fromPlayerId}' in group '${fromG.groupId}' passed to '${a.toPlayerId}' in group '${toG.groupId}'`
+            );
+          }
+
+          // Local ball belongs near the group
+          if (fromG && !fromG.ballIds.includes(a.ballId)) {
+            const lastPos = ballLastKnownPos.get(a.ballId);
+            if (lastPos) {
+              const distToGroup = Math.hypot(lastPos.x - fromG.center.x, lastPos.y - fromG.center.y);
+              if (distToGroup > MAX_BALL_STATION_DISTANCE) {
+                errors.push(
+                  `Pass in step ${sIdx + 1} uses ball '${a.ballId}' belonging to a distant station (dist=${distToGroup.toFixed(1)})`
+                );
+              }
+            }
+          }
+
+          // Check impossible ball teleportation before pass
+          const lastPos = ballLastKnownPos.get(a.ballId);
+          const passerPos = playerCoordsMap.get(a.fromPlayerId);
+          if (lastPos && passerPos) {
+            const distFromLastPos = Math.hypot(lastPos.x - passerPos.x, lastPos.y - passerPos.y);
+            if (distFromLastPos > 30) {
+              errors.push(
+                `Impossible ball teleport: ball '${a.ballId}' jumped ${distFromLastPos.toFixed(1)} units to passer '${a.fromPlayerId}' without travel`
+              );
+            }
+          }
+
+          const receiverPos = playerCoordsMap.get(a.toPlayerId);
+          if (receiverPos) {
+            ballLastKnownPos.set(a.ballId, { x: receiverPos.x, y: receiverPos.y });
+          }
+
+          if (stepBallUsage.has(a.ballId)) {
+            errors.push(
+              `Step ${sIdx + 1} reuses ball '${a.ballId}' in multiple simultaneous actions (${stepBallUsage.get(a.ballId)} and pass ${a.fromPlayerId}->${a.toPlayerId})`
+            );
+          }
+          stepBallUsage.set(a.ballId, `pass ${a.fromPlayerId}->${a.toPlayerId}`);
+        } else if (a.type === 'playerMove') {
+          const pGroup = playerGroupMap.get(a.playerId);
+          if (pGroup) {
+            const distToCenter = Math.hypot(a.to.x - pGroup.center.x, a.to.y - pGroup.center.y);
+            if (distToCenter > MAX_STATION_MOVEMENT_RADIUS) {
+              errors.push(
+                `playerMove for '${a.playerId}' in '${pGroup.groupId}' moves outside local station geometry (target: [${a.to.x}, ${a.to.y}], center: [${pGroup.center.x}, ${pGroup.center.y}], dist=${distToCenter.toFixed(1)})`
+              );
+            }
+          }
+        } else if (a.type === 'ballDribble') {
+          const pGroup = playerGroupMap.get(a.playerId);
+          if (pGroup) {
+            const distToCenter = Math.hypot(a.to.x - pGroup.center.x, a.to.y - pGroup.center.y);
+            if (distToCenter > MAX_STATION_MOVEMENT_RADIUS) {
+              errors.push(
+                `ballDribble for '${a.playerId}' in '${pGroup.groupId}' moves outside local station geometry (target: [${a.to.x}, ${a.to.y}], dist=${distToCenter.toFixed(1)})`
+              );
+            }
+          }
+          ballLastKnownPos.set(a.ballId, { x: a.to.x, y: a.to.y });
+        }
+      }
+    });
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
 /**
  * Builds a clear, semantically grounded demonstration animation sequence
  * from the diagram's action paths, players, and balls.
+ * Supports simultaneous multi-group / multi-pair animation where every group
+ * operates locally with its own ball and within its own station geometry.
  */
 export function buildSemanticAnimation(
   diagram: StructuredDrillDiagram,
@@ -2219,100 +2531,232 @@ export function buildSemanticAnimation(
 
   const primaryBall = balls[0] || { id: 'b1', x: players[0]?.x ?? 50, y: players[0]?.y ?? 50 };
 
-  // Translate paths into ordered demonstration animation steps
-  if (paths.length > 0) {
-    paths.forEach((p, idx) => {
-      const fromP = playerMap.get(p.fromPlayerId);
-      const toP = p.toPlayerId ? playerMap.get(p.toPlayerId) : undefined;
-      const stepDuration = 2.0;
+  const groups = deriveLocalGroups(diagram);
+  const activeGroups = groups.filter((g) => g.playerIds.length >= 2);
 
-      if (p.type === 'pass' && fromP && toP) {
-        steps.push({
-          id: `step-${idx + 1}-pass`,
-          start: currentTime,
-          duration: stepDuration,
+  // If there are multiple self-contained groups/stations: animate groups simultaneously
+  if (activeGroups.length > 1) {
+    const isAllPairs = activeGroups.every((g) => g.playerIds.length === 2);
+
+    if (isAllPairs) {
+      // 1. Step 1: All pairs pass simultaneously A -> B
+      const step1Actions: DiagramAnimationAction[] = activeGroups.map((g) => {
+        const [idA, idB] = g.playerIds;
+        const localBall = g.ballIds[0] || primaryBall.id;
+        return {
+          type: 'ballPass',
+          ballId: localBall,
+          fromPlayerId: idA,
+          toPlayerId: idB,
+        };
+      });
+
+      steps.push({
+        id: 'step-1-pass',
+        start: 0,
+        duration: 2.0,
+        actions: step1Actions,
+      });
+
+      // 2. Step 2: All pairs return pass simultaneously B -> A
+      const step2Actions: DiagramAnimationAction[] = activeGroups.map((g) => {
+        const [idA, idB] = g.playerIds;
+        const localBall = g.ballIds[0] || primaryBall.id;
+        return {
+          type: 'ballPass',
+          ballId: localBall,
+          fromPlayerId: idB,
+          toPlayerId: idA,
+        };
+      });
+
+      steps.push({
+        id: 'step-2-return-pass',
+        start: 2.0,
+        duration: 2.0,
+        actions: step2Actions,
+      });
+
+      currentTime = 4.0;
+    } else {
+      // Multi-station drills with arbitrary station paths (e.g. 4 quad stations)
+      const maxGroupSteps = Math.max(...activeGroups.map((g) => g.paths.length), 2);
+
+      for (let sIdx = 0; sIdx < maxGroupSteps; sIdx++) {
+        const stepActions: DiagramAnimationAction[] = [];
+
+        for (const g of activeGroups) {
+          const localBallId = g.ballIds[0] || primaryBall.id;
+          const p = g.paths[sIdx];
+
+          if (p) {
+            const fromP = playerMap.get(p.fromPlayerId);
+            const toP = p.toPlayerId ? playerMap.get(p.toPlayerId) : undefined;
+
+            if (p.type === 'pass' && fromP) {
+              const targetToId = toP && g.playerIds.includes(toP.id)
+                ? toP.id
+                : g.playerIds.find((id) => id !== fromP.id) || g.playerIds[1];
+              stepActions.push({
+                type: 'ballPass',
+                ballId: localBallId,
+                fromPlayerId: fromP.id,
+                toPlayerId: targetToId,
+              });
+            } else if (p.type === 'movement' && fromP) {
+              let targetX: number;
+              let targetY: number;
+              if (toP && g.playerIds.includes(toP.id)) {
+                targetX = Math.round(toP.x + (toP.x > fromP.x ? -5 : (toP.x < fromP.x ? 5 : 0)));
+                targetY = toP.y;
+              } else {
+                const dx = fromP.x >= g.center.x ? -4 : 4;
+                const dy = fromP.y >= g.center.y ? -3 : 3;
+                targetX = Math.round(fromP.x + dx);
+                targetY = Math.round(fromP.y + dy);
+              }
+              stepActions.push({
+                type: 'playerMove',
+                playerId: fromP.id,
+                to: { x: targetX, y: targetY },
+              });
+            } else if (p.type === 'dribble' && fromP) {
+              let targetX: number;
+              let targetY: number;
+              if (toP && g.playerIds.includes(toP.id)) {
+                targetX = toP.x;
+                targetY = toP.y;
+              } else {
+                const dx = fromP.x >= g.center.x ? -5 : 5;
+                const dy = fromP.y >= g.center.y ? -3 : 3;
+                targetX = Math.round(fromP.x + dx);
+                targetY = Math.round(fromP.y + dy);
+              }
+              stepActions.push({
+                type: 'ballDribble',
+                ballId: localBallId,
+                playerId: fromP.id,
+                to: { x: targetX, y: targetY },
+              });
+            }
+          } else if (g.playerIds.length === 2 && sIdx === 1) {
+            // Pair return pass fallback
+            stepActions.push({
+              type: 'ballPass',
+              ballId: localBallId,
+              fromPlayerId: g.playerIds[1],
+              toPlayerId: g.playerIds[0],
+            });
+          }
+        }
+
+        if (stepActions.length > 0) {
+          steps.push({
+            id: `step-${sIdx + 1}`,
+            start: currentTime,
+            duration: 2.0,
+            actions: stepActions,
+          });
+          currentTime += 2.0;
+        }
+      }
+    }
+  } else {
+    // Single-group or chain drills (e.g. test D4, skill rondo, single 1v1 grid)
+    if (paths.length > 0) {
+      paths.forEach((p, idx) => {
+        const fromP = playerMap.get(p.fromPlayerId);
+        const toP = p.toPlayerId ? playerMap.get(p.toPlayerId) : undefined;
+        const stepDuration = 2.0;
+
+        if (p.type === 'pass' && fromP && toP) {
+          steps.push({
+            id: `step-${idx + 1}-pass`,
+            start: currentTime,
+            duration: stepDuration,
+            actions: [
+              {
+                type: 'ballPass',
+                ballId: primaryBall.id,
+                fromPlayerId: fromP.id,
+                toPlayerId: toP.id,
+              },
+            ],
+          });
+          currentTime += stepDuration;
+        } else if (p.type === 'movement' && fromP) {
+          const targetX = toP
+            ? Math.round(toP.x + (toP.x > fromP.x ? -6 : 6))
+            : Math.min(90, Math.max(10, fromP.x + 10));
+          const targetY = toP ? toP.y : fromP.y;
+          steps.push({
+            id: `step-${idx + 1}-move`,
+            start: currentTime,
+            duration: stepDuration,
+            actions: [
+              {
+                type: 'playerMove',
+                playerId: fromP.id,
+                to: { x: targetX, y: targetY },
+              },
+            ],
+          });
+          currentTime += stepDuration;
+        } else if (p.type === 'dribble' && fromP) {
+          const targetX = toP ? toP.x : Math.min(88, Math.max(12, fromP.x + 12));
+          const targetY = toP ? toP.y : fromP.y;
+          steps.push({
+            id: `step-${idx + 1}-dribble`,
+            start: currentTime,
+            duration: stepDuration,
+            actions: [
+              {
+                type: 'ballDribble',
+                ballId: primaryBall.id,
+                playerId: fromP.id,
+                to: { x: targetX, y: targetY },
+              },
+            ],
+          });
+          currentTime += stepDuration;
+        }
+      });
+    }
+
+    // Fallback demo for pairing or group if no paths converted
+    if (steps.length === 0 && players.length >= 2) {
+      const p1 = players[0];
+      const p2 = players[1];
+      steps.push(
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.0,
           actions: [
             {
               type: 'ballPass',
               ballId: primaryBall.id,
-              fromPlayerId: fromP.id,
-              toPlayerId: toP.id,
+              fromPlayerId: p1.id,
+              toPlayerId: p2.id,
             },
           ],
-        });
-        currentTime += stepDuration;
-      } else if (p.type === 'movement' && fromP) {
-        const targetX = toP
-          ? Math.round(toP.x + (toP.x > fromP.x ? -6 : 6))
-          : Math.min(90, Math.max(10, fromP.x + 10));
-        const targetY = toP ? toP.y : fromP.y;
-        steps.push({
-          id: `step-${idx + 1}-move`,
-          start: currentTime,
-          duration: stepDuration,
+        },
+        {
+          id: 'step2',
+          start: 2.0,
+          duration: 2.0,
           actions: [
             {
-              type: 'playerMove',
-              playerId: fromP.id,
-              to: { x: targetX, y: targetY },
-            },
-          ],
-        });
-        currentTime += stepDuration;
-      } else if (p.type === 'dribble' && fromP) {
-        const targetX = toP ? toP.x : Math.min(88, Math.max(12, fromP.x + 12));
-        const targetY = toP ? toP.y : fromP.y;
-        steps.push({
-          id: `step-${idx + 1}-dribble`,
-          start: currentTime,
-          duration: stepDuration,
-          actions: [
-            {
-              type: 'ballDribble',
+              type: 'ballPass',
               ballId: primaryBall.id,
-              playerId: fromP.id,
-              to: { x: targetX, y: targetY },
+              fromPlayerId: p2.id,
+              toPlayerId: p1.id,
             },
           ],
-        });
-        currentTime += stepDuration;
-      }
-    });
-  }
-
-  // Fallback demo for pairing or group if no paths converted
-  if (steps.length === 0 && players.length >= 2) {
-    const p1 = players[0];
-    const p2 = players[1];
-    steps.push(
-      {
-        id: 'step1',
-        start: 0,
-        duration: 2.0,
-        actions: [
-          {
-            type: 'ballPass',
-            ballId: primaryBall.id,
-            fromPlayerId: p1.id,
-            toPlayerId: p2.id,
-          },
-        ],
-      },
-      {
-        id: 'step2',
-        start: 2.0,
-        duration: 2.0,
-        actions: [
-          {
-            type: 'ballPass',
-            ballId: primaryBall.id,
-            fromPlayerId: p2.id,
-            toPlayerId: p1.id,
-          },
-        ],
-      }
-    );
-    currentTime = 4.0;
+        }
+      );
+      currentTime = 4.0;
+    }
   }
 
   const duration = Math.max(2, Math.round(currentTime * 10) / 10);
@@ -2675,30 +3119,73 @@ function buildPairDiagram(count: number, options: BuildDiagramOptions): Structur
   const row1Count = numPairs > 4 ? Math.ceil(numPairs / 2) : numPairs;
   const row2Count = numPairs > 4 ? numPairs - row1Count : 0;
 
+  // Local pair pattern offsets relative to station origin (cx, cy):
+  // Upper and lower row share the exact same local pair geometry translated by origin offset
+  const LOCAL_PAIR_OFFSETS = {
+    passer: { dx: 0, dy: -7 },
+    receiver: { dx: 0, dy: 7 },
+    coneLeft: { dx: -6, dy: 0 },
+    coneRight: { dx: 6, dy: 0 },
+    ball: { dx: 0, dy: -3 },
+  };
+
+  // Station origins for each row
+  const stationOrigins: DiagramCoordinate[] = [];
+  for (let i = 0; i < row1Count; i++) {
+    const cx = Math.round(16 + (i * 68) / Math.max(1, row1Count - 1));
+    const cy = numPairs > 4 ? 24 : 50;
+    stationOrigins.push({ x: cx, y: cy });
+  }
+  for (let i = 0; i < row2Count; i++) {
+    const cx = Math.round(16 + (i * 68) / Math.max(1, row2Count - 1));
+    const cy = 76;
+    stationOrigins.push({ x: cx, y: cy });
+  }
+
   let pIdx = 1;
   let coneIdx = 1;
   let ballIdx = 1;
   let pathIdx = 1;
 
-  // Row 1: spacing pairs with dy=14 within pair, dx >= 22 between pairs
-  for (let i = 0; i < row1Count; i++) {
-    const cx = Math.round(16 + (i * 68) / Math.max(1, row1Count - 1));
-    const cy = numPairs > 4 ? 24 : 50;
-
+  stationOrigins.forEach((origin) => {
     const idA = `p${pIdx++}`;
     const idB = `p${pIdx++}`;
 
     players.push(
-      { id: idA, team: 'blue', role: 'passer', x: cx, y: cy - 7 },
-      { id: idB, team: 'blue', role: 'receiver', x: cx, y: cy + 7 }
+      {
+        id: idA,
+        team: 'blue',
+        role: 'passer',
+        x: origin.x + LOCAL_PAIR_OFFSETS.passer.dx,
+        y: origin.y + LOCAL_PAIR_OFFSETS.passer.dy,
+      },
+      {
+        id: idB,
+        team: 'blue',
+        role: 'receiver',
+        x: origin.x + LOCAL_PAIR_OFFSETS.receiver.dx,
+        y: origin.y + LOCAL_PAIR_OFFSETS.receiver.dy,
+      }
     );
 
     cones.push(
-      { id: `c${coneIdx++}`, x: cx - 6, y: cy },
-      { id: `c${coneIdx++}`, x: cx + 6, y: cy }
+      {
+        id: `c${coneIdx++}`,
+        x: origin.x + LOCAL_PAIR_OFFSETS.coneLeft.dx,
+        y: origin.y + LOCAL_PAIR_OFFSETS.coneLeft.dy,
+      },
+      {
+        id: `c${coneIdx++}`,
+        x: origin.x + LOCAL_PAIR_OFFSETS.coneRight.dx,
+        y: origin.y + LOCAL_PAIR_OFFSETS.coneRight.dy,
+      }
     );
 
-    balls.push({ id: `b${ballIdx++}`, x: cx, y: cy - 3 });
+    balls.push({
+      id: `b${ballIdx++}`,
+      x: origin.x + LOCAL_PAIR_OFFSETS.ball.dx,
+      y: origin.y + LOCAL_PAIR_OFFSETS.ball.dy,
+    });
 
     paths.push({
       id: `path${pathIdx++}`,
@@ -2706,35 +3193,7 @@ function buildPairDiagram(count: number, options: BuildDiagramOptions): Structur
       fromPlayerId: idA,
       toPlayerId: idB,
     });
-  }
-
-  // Row 2
-  for (let i = 0; i < row2Count; i++) {
-    const cx = Math.round(16 + (i * 68) / Math.max(1, row2Count - 1));
-    const cy = 76;
-
-    const idA = `p${pIdx++}`;
-    const idB = `p${pIdx++}`;
-
-    players.push(
-      { id: idA, team: 'blue', role: 'passer', x: cx, y: cy - 7 },
-      { id: idB, team: 'blue', role: 'receiver', x: cx, y: cy + 7 }
-    );
-
-    cones.push(
-      { id: `c${coneIdx++}`, x: cx - 6, y: cy },
-      { id: `c${coneIdx++}`, x: cx + 6, y: cy }
-    );
-
-    balls.push({ id: `b${ballIdx++}`, x: cx, y: cy - 3 });
-
-    paths.push({
-      id: `path${pathIdx++}`,
-      type: 'pass',
-      fromPlayerId: idA,
-      toPlayerId: idB,
-    });
-  }
+  });
 
   // Remainder player if odd or leftover
   for (let i = 0; i < remainder; i++) {

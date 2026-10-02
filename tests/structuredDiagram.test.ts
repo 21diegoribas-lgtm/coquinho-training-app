@@ -18,6 +18,7 @@ import {
   COACHING_ENTER_DURATION,
   COACHING_EXIT_DURATION,
   DEFAULT_POLISHED_MOTION_OPTIONS,
+  deriveLocalGroups,
   detectEquipmentGoals,
   easeBallDribble,
   easeBallPass,
@@ -54,6 +55,7 @@ import {
   shouldTriggerCoachingMoment,
   updateSeekTriggerState,
   validateDiagramAnimation,
+  validateGroupedDiagram,
   validateSemanticDiagram,
   validateStructuredDiagram,
 } from '../src/services/structuredDiagram';
@@ -2935,6 +2937,457 @@ test('FIX-A: getCoachingPhaseState keeps hold phase fully readable and camera fo
   const exitState = getCoachingPhaseState(3.7, duration);
   assert.equal(exitState.phase, 'exit');
   assert.ok(exitState.cameraEase < 1.0);
+});
+
+// =============================================================================
+// TASK FIX-B TESTS: LOCAL PAIR/STATION PASSING & MOVEMENT
+// =============================================================================
+
+test('FIX-B: 8 pairs (16 players) local group model derives exactly 8 self-contained groups', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  const groups = deriveLocalGroups(diag);
+  assert.equal(groups.length, 8, 'Must derive exactly 8 local groups for 8 pairs');
+
+  // Verify player IDs in every pair
+  const expectedPairs = [
+    ['p1', 'p2'],
+    ['p3', 'p4'],
+    ['p5', 'p6'],
+    ['p7', 'p8'],
+    ['p9', 'p10'],
+    ['p11', 'p12'],
+    ['p13', 'p14'],
+    ['p15', 'p16'],
+  ];
+
+  expectedPairs.forEach(([expectedA, expectedB], idx) => {
+    const g = groups[idx];
+    assert.deepEqual(g.playerIds, [expectedA, expectedB], `Pair ${idx + 1} must contain ${expectedA} and ${expectedB}`);
+  });
+});
+
+test('FIX-B: local ball ownership assigns unique nearby ball to every pair station', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  assert.equal(diag.balls.length, 8, 'Diagram must have 8 balls for 8 pairs');
+  const groups = deriveLocalGroups(diag);
+
+  const ownedBallIds = new Set<string>();
+  groups.forEach((g, idx) => {
+    assert.equal(g.ballIds.length, 1, `Pair ${idx + 1} must own exactly 1 local ball`);
+    const ballId = g.ballIds[0];
+    assert.ok(!ownedBallIds.has(ballId), `Ball ${ballId} must not be shared across stations`);
+    ownedBallIds.add(ballId);
+
+    // Verify ball is located close to the station center
+    const ball = diag.balls.find((b) => b.id === ballId)!;
+    const dist = Math.hypot(ball.x - g.center.x, ball.y - g.center.y);
+    assert.ok(dist <= 5, `Ball ${ballId} distance (${dist}) to pair center must be within local station`);
+  });
+
+  assert.equal(ownedBallIds.size, 8, 'All 8 pairs must have unique ball ownership');
+});
+
+test('FIX-B: pair pass mapping ensures all passes stay strictly within pair (p1<->p2 ... p15<->p16)', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  const anim = diag.animation!;
+  assert.ok(anim && Array.isArray(anim.steps) && anim.steps.length >= 2);
+
+  // Expected pair partners
+  const pairPartnerMap = new Map<string, string>([
+    ['p1', 'p2'], ['p2', 'p1'],
+    ['p3', 'p4'], ['p4', 'p3'],
+    ['p5', 'p6'], ['p6', 'p5'],
+    ['p7', 'p8'], ['p8', 'p7'],
+    ['p9', 'p10'], ['p10', 'p9'],
+    ['p11', 'p12'], ['p12', 'p11'],
+    ['p13', 'p14'], ['p14', 'p13'],
+    ['p15', 'p16'], ['p16', 'p15'],
+  ]);
+
+  // Check every ballPass action across all animation steps
+  for (const step of anim.steps) {
+    for (const action of step.actions) {
+      if (action.type === 'ballPass') {
+        const expectedPartner = pairPartnerMap.get(action.fromPlayerId);
+        assert.ok(expectedPartner, `fromPlayerId ${action.fromPlayerId} must be a known pair player`);
+        assert.equal(
+          action.toPlayerId,
+          expectedPartner,
+          `Pass from ${action.fromPlayerId} must target ${expectedPartner}, never a player from another station`
+        );
+      }
+    }
+  }
+
+  // Specifically verify lower-row groups: no cross-passes like p9 -> p12 or p11 -> p14
+  const allPasses = anim.steps.flatMap((s) => s.actions.filter((a): a is { type: 'ballPass'; ballId: string; fromPlayerId: string; toPlayerId: string } => a.type === 'ballPass'));
+  const p9Pass = allPasses.find((p) => p.fromPlayerId === 'p9');
+  assert.ok(p9Pass);
+  assert.equal(p9Pass.toPlayerId, 'p10');
+  assert.notEqual(p9Pass.toPlayerId, 'p12');
+
+  const p11Pass = allPasses.find((p) => p.fromPlayerId === 'p11');
+  assert.ok(p11Pass);
+  assert.equal(p11Pass.toPlayerId, 'p12');
+  assert.notEqual(p11Pass.toPlayerId, 'p14');
+});
+
+test('FIX-B: lower row geometry is equivalent to upper row geometry translated by station offset', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  const pMap = new Map<string, { x: number; y: number }>();
+  diag.players.forEach((p) => pMap.set(p.id, { x: p.x, y: p.y }));
+
+  // Compare Row 1 pairs [p1,p2], [p3,p4], [p5,p6], [p7,p8]
+  // with Row 2 pairs [p9,p10], [p11,p12], [p13,p14], [p15,p16]
+  const row1Pairs = [['p1', 'p2'], ['p3', 'p4'], ['p5', 'p6'], ['p7', 'p8']];
+  const row2Pairs = [['p9', 'p10'], ['p11', 'p12'], ['p13', 'p14'], ['p15', 'p16']];
+
+  for (let i = 0; i < 4; i++) {
+    const [pA1, pB1] = row1Pairs[i];
+    const [pA2, pB2] = row2Pairs[i];
+
+    const posA1 = pMap.get(pA1)!;
+    const posB1 = pMap.get(pB1)!;
+    const posA2 = pMap.get(pA2)!;
+    const posB2 = pMap.get(pB2)!;
+
+    // Both pairs should have identical x coordinates in their respective column
+    assert.equal(posA1.x, posB1.x, `Row 1 pair ${pA1}-${pB1} must align vertically`);
+    assert.equal(posA2.x, posB2.x, `Row 2 pair ${pA2}-${pB2} must align vertically`);
+    assert.equal(posA1.x, posA2.x, `Column ${i + 1} x coordinates must match between rows`);
+
+    // Separation between partner players in each pair must be exactly equal (dy = 14)
+    const dy1 = Math.abs(posB1.y - posA1.y);
+    const dy2 = Math.abs(posB2.y - posA2.y);
+    assert.equal(dy1, dy2, `Separation in pair ${pA2}-${pB2} (${dy2}) must match pair ${pA1}-${pB1} (${dy1})`);
+    assert.equal(dy1, 14);
+
+    // Row 2 is simply translated down by station offset (cy = 76 vs cy = 24 => dy = 52)
+    const rowOffset = posA2.y - posA1.y;
+    assert.equal(rowOffset, 52, 'Row 2 station offset must be consistent (52 units)');
+  }
+});
+
+test('FIX-B: static diagram path and animated action agree for every station', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  const anim = diag.animation!;
+  assert.ok(anim);
+
+  // For every path in diagram.paths, verify a corresponding ballPass exists with identical from and to
+  const step1 = anim.steps[0];
+  for (const path of diag.paths) {
+    if (path.type === 'pass') {
+      const match = step1.actions.find(
+        (a): a is { type: 'ballPass'; ballId: string; fromPlayerId: string; toPlayerId: string } =>
+          a.type === 'ballPass' &&
+          a.fromPlayerId === path.fromPlayerId &&
+          a.toPlayerId === path.toPlayerId
+      );
+      assert.ok(match, `Step 1 must contain matching ballPass for path ${path.fromPlayerId} -> ${path.toPlayerId}`);
+    }
+  }
+});
+
+test('FIX-B: simultaneous group execution: all 8 pairs pass simultaneously with their own ball', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  const anim = diag.animation!;
+  assert.ok(anim);
+  assert.equal(anim.duration, 4.0, '2 synchronized steps of 2.0s = 4.0s total duration');
+  assert.equal(anim.steps.length, 2);
+
+  // Step 1: 8 passes simultaneously
+  const step1 = anim.steps[0];
+  assert.equal(step1.start, 0);
+  assert.equal(step1.duration, 2.0);
+  assert.equal(step1.actions.length, 8, 'Step 1 must have 8 simultaneous passes');
+
+  const step1BallIds = new Set(step1.actions.map((a) => (a as { ballId: string }).ballId));
+  assert.equal(step1BallIds.size, 8, 'All 8 passes must use distinct local balls');
+
+  // Verify interpolated state midway through step 1 (t = 1.0s)
+  const stateMid1 = interpolateAnimationState(diag, 1.0, DEFAULT_POLISHED_MOTION_OPTIONS);
+  assert.equal(stateMid1.balls.length, 8);
+
+  // Upper row balls (b1..b4) must be in upper pitch (y ~ 24)
+  for (let i = 0; i < 4; i++) {
+    const b = stateMid1.balls[i];
+    assert.ok(b.y < 50, `Upper row ball ${b.id} y (${b.y}) must stay in upper pitch`);
+  }
+
+  // Lower row balls (b5..b8) must be in lower pitch (y ~ 76)
+  for (let i = 4; i < 8; i++) {
+    const b = stateMid1.balls[i];
+    assert.ok(b.y > 50, `Lower row ball ${b.id} y (${b.y}) must stay in lower pitch`);
+  }
+});
+
+test('FIX-B: validateGroupedDiagram validates correct 8-pair diagram and flags cross-station anomalies', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  // Valid diagram must pass with no errors
+  const valResult = validateGroupedDiagram(diag);
+  assert.equal(valResult.ok, true, `Expected valid diagram to pass: ${valResult.errors.join(', ')}`);
+  assert.equal(valResult.errors.length, 0);
+
+  // 1. Cross-group pass detection: p9 passing to p12 across different lower-row stations
+  const diagCorruptPass = JSON.parse(JSON.stringify(diag));
+  diagCorruptPass.animation.steps[0].actions[4].toPlayerId = 'p12';
+  const corruptPassResult = validateGroupedDiagram(diagCorruptPass);
+  assert.equal(corruptPassResult.ok, false);
+  assert.ok(
+    corruptPassResult.errors.some((e: string) => e.includes('Cross-group pass action') || e.includes('p12')),
+    'Must catch cross-station pass p9 -> p12'
+  );
+
+  // 2. Distant ball / teleport detection: lower-row pair using upper-row ball b1
+  const diagCorruptBall = JSON.parse(JSON.stringify(diag));
+  diagCorruptBall.animation.steps[0].actions[4].ballId = 'b1';
+  const corruptBallResult = validateGroupedDiagram(diagCorruptBall);
+  assert.equal(corruptBallResult.ok, false);
+  assert.ok(
+    corruptBallResult.errors.some((e: string) => e.includes('distant') || e.includes('teleport') || e.includes('multiple simultaneous')),
+    'Must catch lower-row pair using upper-row ball'
+  );
+
+  // 3. Movement outside station geometry: p9 moving to station 8 position (x: 84, y: 76)
+  const diagCorruptMove = JSON.parse(JSON.stringify(diag));
+  diagCorruptMove.animation.steps.push({
+    id: 'step-err-move',
+    start: 4.0,
+    duration: 2.0,
+    actions: [{ type: 'playerMove', playerId: 'p9', to: { x: 84, y: 76 } }],
+  });
+  const corruptMoveResult = validateGroupedDiagram(diagCorruptMove);
+  assert.equal(corruptMoveResult.ok, false);
+  assert.ok(
+    corruptMoveResult.errors.some((e: string) => e.includes('outside local station geometry')),
+    'Must catch playerMove moving to another station'
+  );
+});
+
+test('FIX-B: local movement targets stay strictly within local station geometry', () => {
+  // Construct diagram where each pair has a pass and a follow-up local receiver movement
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  const groups = deriveLocalGroups(diag);
+  assert.equal(groups.length, 8);
+
+  // Add local movement path to every group
+  const customPaths = [...diag.paths];
+  groups.forEach((g) => {
+    customPaths.push({
+      id: `move-${g.groupId}`,
+      type: 'movement',
+      fromPlayerId: g.playerIds[1], // receiver moves
+      toPlayerId: g.playerIds[0],
+    });
+  });
+
+  const diagWithMoves = {
+    ...diag,
+    paths: customPaths,
+    animation: undefined, // regenerate with movements
+  };
+  const anim = buildSemanticAnimation(diagWithMoves);
+  assert.ok(anim);
+
+  // Validate that all actions in all steps remain strictly within local group
+  const valResult = validateGroupedDiagram({ ...diagWithMoves, animation: anim });
+  assert.equal(valResult.ok, true, `Movement actions must be locally contained: ${valResult.errors.join(', ')}`);
+});
+
+test('FIX-B TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 full 10-point pair drill verification', () => {
+  const diag = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    topic: 'Nhận bóng mở thân người',
+    gameFormat: '7v7',
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2 trên 2 hàng ngang',
+    equipment: ['12 Nón tập', '8 Quả bóng', 'Áo bib 2 màu'],
+  });
+
+  // Point 1: exactly 8 pairs
+  const groups = deriveLocalGroups(diag);
+  assert.equal(groups.length, 8, 'Point 1: Must have exactly 8 pairs');
+
+  // Point 2: every pair has exactly 2 players
+  groups.forEach((g, idx) => {
+    assert.equal(g.playerIds.length, 2, `Point 2: Pair ${idx + 1} must have exactly 2 players`);
+  });
+
+  // Point 3: upper-row passes are local (pairs 1..4 = p1..p8)
+  const anim = diag.animation!;
+  assert.ok(anim, 'Animation must exist');
+  const upperPasses = anim.steps.flatMap((s) =>
+    s.actions.filter((a): a is { type: 'ballPass'; ballId: string; fromPlayerId: string; toPlayerId: string } =>
+      a.type === 'ballPass' && ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8'].includes(a.fromPlayerId)
+    )
+  );
+  assert.ok(upperPasses.length > 0, 'Must have upper-row passes');
+  upperPasses.forEach((pass) => {
+    const fromP = pass.fromPlayerId;
+    const toP = pass.toPlayerId;
+    const partnerMap: Record<string, string> = { p1: 'p2', p2: 'p1', p3: 'p4', p4: 'p3', p5: 'p6', p6: 'p5', p7: 'p8', p8: 'p7' };
+    assert.equal(toP, partnerMap[fromP], `Point 3: Upper-row pass from ${fromP} must target ${partnerMap[fromP]}`);
+  });
+
+  // Point 4: lower-row passes are local (pairs 5..8 = p9..p16)
+  const lowerPasses = anim.steps.flatMap((s) =>
+    s.actions.filter((a): a is { type: 'ballPass'; ballId: string; fromPlayerId: string; toPlayerId: string } =>
+      a.type === 'ballPass' && ['p9', 'p10', 'p11', 'p12', 'p13', 'p14', 'p15', 'p16'].includes(a.fromPlayerId)
+    )
+  );
+  assert.ok(lowerPasses.length > 0, 'Must have lower-row passes');
+  lowerPasses.forEach((pass) => {
+    const fromP = pass.fromPlayerId;
+    const toP = pass.toPlayerId;
+    const partnerMap: Record<string, string> = {
+      p9: 'p10', p10: 'p9',
+      p11: 'p12', p12: 'p11',
+      p13: 'p14', p14: 'p13',
+      p15: 'p16', p16: 'p15',
+    };
+    assert.equal(toP, partnerMap[fromP], `Point 4: Lower-row pass from ${fromP} must target ${partnerMap[fromP]}`);
+  });
+
+  // Point 5: no diagonal cross-group passes
+  anim.steps.forEach((step) => {
+    step.actions.forEach((a) => {
+      if (a.type === 'ballPass') {
+        const fromNum = parseInt(a.fromPlayerId.replace(/\D/g, ''), 10);
+        const toNum = parseInt(a.toPlayerId.replace(/\D/g, ''), 10);
+        const fromPairIdx = Math.floor((fromNum - 1) / 2);
+        const toPairIdx = Math.floor((toNum - 1) / 2);
+        assert.equal(
+          fromPairIdx,
+          toPairIdx,
+          `Point 5: No diagonal cross-group pass. ${a.fromPlayerId} (pair ${fromPairIdx + 1}) cannot pass to ${a.toPlayerId} (pair ${toPairIdx + 1})`
+        );
+      }
+    });
+  });
+
+  // Point 6: lower-row geometry matches translated upper-row geometry
+  const pMap = new Map(diag.players.map((p) => [p.id, p]));
+  for (let col = 0; col < 4; col++) {
+    const pUpperPasser = pMap.get(`p${col * 2 + 1}`)!;
+    const pUpperReceiver = pMap.get(`p${col * 2 + 2}`)!;
+    const pLowerPasser = pMap.get(`p${col * 2 + 9}`)!;
+    const pLowerReceiver = pMap.get(`p${col * 2 + 10}`)!;
+
+    assert.equal(pUpperPasser.x, pLowerPasser.x, `Point 6: Column ${col + 1} x must match`);
+    assert.equal(pUpperReceiver.x, pLowerReceiver.x, `Point 6: Column ${col + 1} receiver x must match`);
+    const upperDy = pUpperReceiver.y - pUpperPasser.y;
+    const lowerDy = pLowerReceiver.y - pLowerPasser.y;
+    assert.equal(upperDy, lowerDy, `Point 6: Pair vertical distance must match (upper: ${upperDy}, lower: ${lowerDy})`);
+    assert.equal(pLowerPasser.y - pUpperPasser.y, 52, 'Point 6: Row translation offset is exactly 52 units');
+  }
+
+  // Point 7: no playerMove targets another pair's station
+  anim.steps.forEach((step) => {
+    step.actions.forEach((a) => {
+      if (a.type === 'playerMove') {
+        const pGroup = groups.find((g) => g.playerIds.includes(a.playerId));
+        assert.ok(pGroup, `Player ${a.playerId} must belong to a group`);
+        const dist = Math.hypot(a.to.x - pGroup.center.x, a.to.y - pGroup.center.y);
+        assert.ok(dist <= 22, `Point 7: playerMove target [${a.to.x}, ${a.to.y}] must remain within station ${pGroup.groupId}`);
+      }
+    });
+  });
+
+  // Point 8: ball does not jump from one distant group to another
+  for (let t = 0; t <= anim.duration; t += 0.5) {
+    const interpolated = interpolateAnimationState(diag, t, DEFAULT_POLISHED_MOTION_OPTIONS);
+    groups.forEach((g) => {
+      const ballId = g.ballIds[0];
+      const ball = interpolated.balls.find((b) => b.id === ballId);
+      assert.ok(ball, `Ball ${ballId} must exist at time ${t}`);
+      const dist = Math.hypot(ball.x - g.center.x, ball.y - g.center.y);
+      assert.ok(
+        dist <= 22,
+        `Point 8: Ball ${ballId} at t=${t} (dist=${dist.toFixed(1)}) must stay near station center (${g.center.x}, ${g.center.y}) and not jump to distant groups`
+      );
+    });
+  }
+
+  // Point 9: static paths and animation actions match
+  const step1 = anim.steps[0];
+  diag.paths.forEach((path) => {
+    if (path.type === 'pass') {
+      const matchingAction = step1.actions.find(
+        (a): a is { type: 'ballPass'; ballId: string; fromPlayerId: string; toPlayerId: string } =>
+          a.type === 'ballPass' &&
+          a.fromPlayerId === path.fromPlayerId &&
+          a.toPlayerId === path.toPlayerId
+      );
+      assert.ok(
+        matchingAction,
+        `Point 9: Static path ${path.fromPlayerId} -> ${path.toPlayerId} must have exact matching ballPass action`
+      );
+    }
+  });
+
+  // Point 10: all 16 players remain correctly represented
+  assert.equal(diag.players.length, 16, 'Point 10: All 16 players must be present in diagram');
+  const playerIds = new Set(diag.players.map((p) => p.id));
+  for (let i = 1; i <= 16; i++) {
+    assert.ok(playerIds.has(`p${i}`), `Point 10: Player p${i} must exist in diagram`);
+  }
 });
 
 
