@@ -351,3 +351,321 @@ export function buildCoachingNarrationTimeline(
   const sorted = sortNarrationChronologically(items);
   return preventNarrationOverlap(sorted, wpm);
 }
+
+// =============================================================================
+// TASK TTS-A2: Browser Audio Track Generation for Coaching Narration Items
+// =============================================================================
+
+/**
+ * Default normalized volume for coaching voice narration.
+ */
+export const DEFAULT_NARRATION_VOLUME = 0.9;
+
+/**
+ * Injectable asynchronous audio clip provider interface (TASK TTS-A2).
+ * Allows TTS-A3 to inject real speech synthesis or decoded audio buffers later.
+ */
+export type NarrationAudioProvider = (
+  item: CoachingNarrationItem,
+  signal?: AbortSignal
+) => Promise<AudioBuffer | null>;
+
+/**
+ * Configuration options for preparing narration audio track.
+ */
+export interface PrepareNarrationAudioTrackOptions {
+  items: CoachingNarrationItem[];
+  audioProvider: NarrationAudioProvider;
+  totalPresentationDuration?: number;
+  signal?: AbortSignal;
+  audioContext?: AudioContext;
+  volume?: number;
+  presentationStartOffset?: number;
+  closeContextOnCleanup?: boolean;
+}
+
+/**
+ * Safe controller exposing one audio MediaStreamTrack and lifecycle hooks (TASK TTS-A2).
+ */
+export interface NarrationAudioController {
+  audioTrack: MediaStreamTrack | null;
+  stream: MediaStream | null;
+  context: AudioContext | null;
+  cancel: () => void;
+  cleanup: () => void;
+  scheduledClipsCount: number;
+}
+
+/**
+ * Safely inspects browser capabilities for Web Audio MediaStream destination (TASK TTS-A2).
+ */
+export function isNarrationAudioSupported(): boolean {
+  try {
+    const globalObj: any = typeof window !== 'undefined'
+      ? window
+      : (typeof globalThis !== 'undefined' ? globalThis : undefined);
+    if (!globalObj) return false;
+
+    const AudioContextClass = globalObj.AudioContext || globalObj.webkitAudioContext;
+    if (typeof AudioContextClass !== 'function') return false;
+
+    const hasMediaStreamDest =
+      typeof AudioContextClass.prototype?.createMediaStreamDestination === 'function' ||
+      typeof globalObj.MediaStreamAudioDestinationNode !== 'undefined';
+
+    return Boolean(hasMediaStreamDest);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Schedules narration AudioBuffers on the presentation timeline and exposes
+ * ONE MediaStreamTrack for downstream video export (TASK TTS-A2).
+ */
+export async function prepareNarrationAudioTrack(
+  options: PrepareNarrationAudioTrackOptions
+): Promise<NarrationAudioController> {
+  const {
+    items = [],
+    audioProvider,
+    signal,
+    audioContext: externalContext,
+    volume = DEFAULT_NARRATION_VOLUME,
+    presentationStartOffset = 0,
+  } = options;
+
+  let isCancelled = false;
+  let isCleanedUp = false;
+
+  const noOpController: NarrationAudioController = {
+    audioTrack: null,
+    stream: null,
+    context: null,
+    cancel: () => {},
+    cleanup: () => {},
+    scheduledClipsCount: 0,
+  };
+
+  // 1. Guard against pre-aborted signal or empty items
+  if (signal?.aborted || !items || items.length === 0) {
+    return noOpController;
+  }
+
+  // 2. Browser capability check (unless caller provides an existing AudioContext)
+  if (!externalContext && !isNarrationAudioSupported()) {
+    return noOpController;
+  }
+
+  const internalAbortController = new AbortController();
+  const onParentAbort = () => {
+    cancel();
+  };
+  if (signal) {
+    signal.addEventListener('abort', onParentAbort, { once: true });
+  }
+
+  // 3. Sort items strictly chronologically
+  const sortedItems = sortNarrationChronologically(items);
+
+  // 4. Fetch audio buffers via injectable provider
+  type LoadedClip = { item: CoachingNarrationItem; buffer: AudioBuffer };
+  const clipPromises = sortedItems.map(async (item): Promise<LoadedClip | null> => {
+    if (internalAbortController.signal.aborted || isCancelled) return null;
+    try {
+      const buffer = await audioProvider(item, internalAbortController.signal);
+      if (!buffer || typeof buffer.duration !== 'number' || buffer.duration <= 0) {
+        return null;
+      }
+      return { item, buffer };
+    } catch {
+      // Partial failure tolerance: if one item fails, other valid clips may still be used
+      return null;
+    }
+  });
+
+  const loadedResults = await Promise.all(clipPromises);
+
+  // If cancelled while fetching
+  if (isCancelled || signal?.aborted || internalAbortController.signal.aborted) {
+    return noOpController;
+  }
+
+  const validClips: LoadedClip[] = [];
+  for (const res of loadedResults) {
+    if (res && res.buffer) {
+      validClips.push(res);
+    }
+  }
+
+  // 5. If all clips failed or returned null, return clean no-audio controller
+  if (validClips.length === 0) {
+    return noOpController;
+  }
+
+  // 6. Obtain or instantiate AudioContext
+  let context: AudioContext;
+  let ownsContext = false;
+  try {
+    if (externalContext) {
+      context = externalContext;
+    } else {
+      const globalObj: any = typeof window !== 'undefined'
+        ? window
+        : (typeof globalThis !== 'undefined' ? globalThis : undefined);
+      const AudioCtxClass = globalObj.AudioContext || globalObj.webkitAudioContext;
+      context = new AudioCtxClass();
+      ownsContext = true;
+    }
+
+    if (context.state === 'suspended' && typeof context.resume === 'function') {
+      context.resume().catch(() => {});
+    }
+  } catch {
+    return noOpController;
+  }
+
+  // 7. Create destination node and gain node for normalized volume
+  let destNode: MediaStreamAudioDestinationNode;
+  let gainNode: GainNode;
+  try {
+    destNode = context.createMediaStreamDestination();
+    gainNode = context.createGain();
+
+    const normalizedGain = Math.max(0, Math.min(1.0, volume));
+    if (gainNode.gain.setValueAtTime) {
+      gainNode.gain.setValueAtTime(normalizedGain, context.currentTime);
+    } else {
+      gainNode.gain.value = normalizedGain;
+    }
+
+    gainNode.connect(destNode);
+  } catch {
+    if (ownsContext && typeof context.close === 'function') {
+      context.close().catch(() => {});
+    }
+    return noOpController;
+  }
+
+  const stream = destNode.stream || null;
+  const audioTracks = stream && typeof stream.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
+  const audioTrack = audioTracks.length > 0 ? audioTracks[0] : null;
+
+  const activeSources = new Set<AudioBufferSourceNode>();
+  let scheduledClipsCount = 0;
+
+  const baseTime = typeof presentationStartOffset === 'number'
+    ? presentationStartOffset
+    : (context.currentTime || 0);
+
+  // 8. Schedule each valid clip precisely on the AudioContext timeline
+  for (let i = 0; i < validClips.length; i++) {
+    if (isCancelled || isCleanedUp) break;
+
+    const { item, buffer } = validClips[i];
+    const nextItem = i < validClips.length - 1 ? validClips[i + 1].item : undefined;
+
+    // Respect item.maxDuration and guard against overlap with adjacent slot
+    let allowedDuration = item.maxDuration;
+    if (nextItem && nextItem.startPresentationTime > item.startPresentationTime) {
+      const windowToNext = nextItem.startPresentationTime - item.startPresentationTime;
+      allowedDuration = Math.min(allowedDuration, windowToNext);
+    }
+
+    // Clamp duration to min(buffer.duration, allowedDuration)
+    const playDuration = Math.max(0.1, Math.min(buffer.duration, allowedDuration));
+
+    const startTime = Math.max(0, baseTime + item.startPresentationTime);
+    const stopTime = startTime + playDuration;
+
+    try {
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.loop = false;
+      source.connect(gainNode);
+
+      try {
+        source.start(startTime, 0, playDuration);
+      } catch {
+        source.start(startTime);
+      }
+      source.stop(stopTime);
+
+      activeSources.add(source);
+      source.onended = () => {
+        activeSources.delete(source);
+      };
+      scheduledClipsCount++;
+    } catch {
+      // Individual source failure should not abort remaining clips
+    }
+  }
+
+  // 9. Cancel logic
+  const cancel = () => {
+    if (isCancelled) return;
+    isCancelled = true;
+    internalAbortController.abort();
+    if (signal) {
+      signal.removeEventListener('abort', onParentAbort);
+    }
+
+    // Stop all active sources
+    for (const source of Array.from(activeSources)) {
+      try {
+        source.stop(0);
+      } catch {}
+      try {
+        source.disconnect();
+      } catch {}
+    }
+    activeSources.clear();
+
+    // Disconnect gain node
+    try {
+      gainNode.disconnect();
+    } catch {}
+
+    // Stop output tracks
+    if (audioTrack && typeof audioTrack.stop === 'function') {
+      try {
+        audioTrack.stop();
+      } catch {}
+    }
+    if (stream && typeof stream.getTracks === 'function') {
+      try {
+        stream.getTracks().forEach((track) => {
+          if (typeof track.stop === 'function') {
+            try { track.stop(); } catch {}
+          }
+        });
+      } catch {}
+    }
+  };
+
+  // 10. Cleanup logic
+  const shouldCloseContext = options.closeContextOnCleanup !== undefined
+    ? options.closeContextOnCleanup
+    : ownsContext;
+
+  const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    cancel();
+
+    if (shouldCloseContext && context && context.state !== 'closed' && typeof context.close === 'function') {
+      try {
+        context.close().catch(() => {});
+      } catch {}
+    }
+  };
+
+  return {
+    audioTrack,
+    stream,
+    context,
+    cancel,
+    cleanup,
+    scheduledClipsCount,
+  };
+}
