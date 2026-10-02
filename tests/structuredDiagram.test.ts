@@ -15,6 +15,8 @@ import {
   calculatePassBallPosition,
   classifySemanticEvents,
   clusterDiagramPlayers,
+  COACHING_ENTER_DURATION,
+  COACHING_EXIT_DURATION,
   DEFAULT_POLISHED_MOTION_OPTIONS,
   detectEquipmentGoals,
   easeBallDribble,
@@ -25,8 +27,11 @@ import {
   formatCoachingOverlayText,
   getActionEasing,
   getCoachingPhaseState,
+  getCoachingPhaseTiming,
   getCoachingSequencePosition,
   getCoachingSequenceProgress,
+  getEffectiveCoachingDuration,
+  calculateEffectiveCoachingDuration,
   getGoalGeometry,
   getSequenceTimelineMarkers,
   getTeamStyle,
@@ -35,6 +40,9 @@ import {
   interpolateQuadraticBezier,
   interpolateViewBox,
   isOpposedExercise,
+  MAX_COACHING_TOTAL_DURATION,
+  MIN_COACHING_HOLD_DURATION,
+  MIN_COACHING_TOTAL_DURATION,
   normalizeOrientation,
   normalizeStepDurations,
   prioritizeCoachingMoments,
@@ -2791,6 +2799,142 @@ test('D8A: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 
   const valRes = validateDiagramAnimation(anim, diag.players, diag.balls);
   assert.equal(valRes.ok, true);
   assert.deepEqual(valRes.errors, []);
+});
+
+// =============================================================================
+// TASK FIX-A TESTS: COACHING PRESENTATION DURATION & READABILITY
+// =============================================================================
+
+test('FIX-A: minimum total effective duration is at least 3.5s', () => {
+  // Empty or null inputs
+  assert.equal(getEffectiveCoachingDuration(null), 3.5);
+  assert.equal(getEffectiveCoachingDuration(undefined), 3.5);
+  assert.equal(getEffectiveCoachingDuration(''), 3.5);
+  assert.equal(getEffectiveCoachingDuration({ title: '', text: '' }), 3.5);
+
+  // Short cues
+  assert.equal(getEffectiveCoachingDuration('Kiểm tra vai'), 3.5);
+  assert.equal(getEffectiveCoachingDuration({ title: 'Mở thân', text: 'Góc 45 độ' }), 3.5);
+
+  // Moment with tiny stored duration (e.g. 1.0s)
+  const moment: DiagramCoachingMoment = {
+    id: 'cm-tiny',
+    time: 1.0,
+    duration: 1.0,
+    playerId: 'p1',
+    title: 'Vai',
+    text: 'Nhìn',
+  };
+  assert.ok(getEffectiveCoachingDuration(moment) >= MIN_COACHING_TOTAL_DURATION);
+  assert.equal(getEffectiveCoachingDuration(moment), 3.5);
+  assert.equal(calculateEffectiveCoachingDuration(moment), 3.5);
+});
+
+test('FIX-A: hold phase duration is at least 2.0s for any effective duration', () => {
+  // Minimum duration: 3.5s => enter 0.7s, hold 2.1s, exit 0.7s
+  const minTiming = getCoachingPhaseTiming(MIN_COACHING_TOTAL_DURATION);
+  assert.equal(minTiming.enter, COACHING_ENTER_DURATION);
+  assert.equal(minTiming.exit, COACHING_EXIT_DURATION);
+  assert.ok(minTiming.hold >= MIN_COACHING_HOLD_DURATION, `Hold ${minTiming.hold} must be >= 2.0s`);
+  assert.equal(minTiming.hold, 2.1);
+  assert.equal(minTiming.total, 3.5);
+
+  // Test across entire allowed range [3.5s, 5.5s]
+  for (let d = 3.5; d <= 5.5; d += 0.5) {
+    const timing = getCoachingPhaseTiming(d);
+    assert.equal(timing.enter, 0.7);
+    assert.equal(timing.exit, 0.7);
+    assert.ok(timing.hold >= 2.0, `Hold duration for ${d}s must be >= 2.0s`);
+    assert.equal(Math.round((timing.enter + timing.hold + timing.exit) * 10) / 10, d);
+  }
+});
+
+test('FIX-A: text-aware readability tiers scale deterministically (short, medium, long)', () => {
+  // Short text (<= 45 chars): ~3.5s total
+  const short1 = 'Kiểm tra vai'; // 12 chars
+  const short2 = 'Quan sát không gian trước khi đón bóng'; // 39 chars
+  assert.equal(getEffectiveCoachingDuration(short1), 3.5);
+  assert.equal(getEffectiveCoachingDuration(short2), 3.5);
+
+  // Medium text (46-75 chars -> 4.0s; 76-105 chars -> 4.5s): ~4.0–4.5s
+  const medium1 = 'Kiểm tra vai và quan sát các lựa chọn chuyền bóng'; // 50 chars
+  const medium2 = 'Mở tư thế thân người hướng về hướng tấn công tiếp theo để chuẩn bị chuyền'; // 74 chars
+  const medium3 = 'Đón bóng bằng má trong chân xa với tư thế mở thân người để quan sát lựa chọn chuyền tiếp'; // 89 chars
+  assert.equal(getEffectiveCoachingDuration(medium1), 4.0);
+  assert.equal(getEffectiveCoachingDuration(medium2), 4.0);
+  assert.equal(getEffectiveCoachingDuration(medium3), 4.5);
+
+  // Longer text (106-135 chars -> 5.0s; > 135 chars -> 5.5s): ~5.0–5.5s
+  const long1 = 'Đón bóng bằng má trong chân xa với tư thế mở thân người, kiểm tra vai để quan sát lựa chọn chuyền bóng tiếp theo cho đồng đội'; // 126 chars
+  const long2 = 'Kiểm tra vai và quan sát vị trí của đối phương từ tuyến hai để quyết định chuyền bóng hay rê dắt về phía trước nhằm khai thác khoảng trống'; // 139 chars
+  assert.equal(getEffectiveCoachingDuration(long1), 5.0);
+  assert.equal(getEffectiveCoachingDuration(long2), 5.5);
+});
+
+test('FIX-A: maximum duration is strictly capped at 5.5s', () => {
+  const superLongText = 'A'.repeat(500);
+  assert.equal(getEffectiveCoachingDuration(superLongText), MAX_COACHING_TOTAL_DURATION);
+  assert.equal(getEffectiveCoachingDuration(superLongText), 5.5);
+
+  const superLongMoment: DiagramCoachingMoment = {
+    id: 'cm-long',
+    time: 2.0,
+    duration: 10.0,
+    playerId: 'p1',
+    title: 'A'.repeat(200),
+    text: 'B'.repeat(300),
+  };
+  assert.equal(getEffectiveCoachingDuration(superLongMoment), 5.5);
+});
+
+test('FIX-A: stored coachingMoment.duration remains completely unchanged', () => {
+  const originalDuration = 1.8;
+  const moment: DiagramCoachingMoment = {
+    id: 'cm-immutable',
+    time: 2.5,
+    duration: originalDuration,
+    playerId: 'p1',
+    title: 'Kiểm tra vai',
+    text: 'Quan sát kiểm tra vai trước khi nhận bóng',
+  };
+
+  const calculated = getEffectiveCoachingDuration(moment);
+  assert.ok(calculated >= 3.5);
+  assert.equal(moment.duration, originalDuration, 'Stored coachingMoment.duration MUST NOT be mutated');
+});
+
+test('FIX-A: getCoachingPhaseState keeps hold phase fully readable and camera focused', () => {
+  const duration = 4.0; // Medium tier coaching moment (enter: 0.7s, hold: 2.6s, exit: 0.7s)
+
+  // 1. Enter phase (< 0.7s)
+  const enterState = getCoachingPhaseState(0.35, duration);
+  assert.equal(enterState.phase, 'enter');
+  assert.ok(enterState.cameraEase > 0 && enterState.cameraEase < 1.0);
+
+  // 2. Start of hold phase (0.7s)
+  const holdStart = getCoachingPhaseState(0.7, duration);
+  assert.equal(holdStart.phase, 'hold');
+  assert.equal(holdStart.cameraEase, 1.0);
+  assert.equal(holdStart.textOpacity, 1.0);
+  assert.equal(holdStart.highlightOpacity, 1.0);
+
+  // 3. Middle of hold phase (2.0s)
+  const holdMid = getCoachingPhaseState(2.0, duration);
+  assert.equal(holdMid.phase, 'hold');
+  assert.equal(holdMid.cameraEase, 1.0);
+  assert.equal(holdMid.textOpacity, 1.0);
+  assert.equal(holdMid.highlightOpacity, 1.0);
+
+  // 4. End of hold phase (3.3s)
+  const holdEnd = getCoachingPhaseState(3.3, duration);
+  assert.equal(holdEnd.phase, 'hold');
+  assert.equal(holdEnd.cameraEase, 1.0);
+  assert.equal(holdEnd.textOpacity, 1.0);
+
+  // 5. Exit phase (> 3.3s)
+  const exitState = getCoachingPhaseState(3.7, duration);
+  assert.equal(exitState.phase, 'exit');
+  assert.ok(exitState.cameraEase < 1.0);
 });
 
 

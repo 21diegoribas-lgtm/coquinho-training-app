@@ -16,6 +16,7 @@ import {
   formatCoachingOverlayText,
   getCoachingPhaseState,
   getCoachingSequenceProgress,
+  getEffectiveCoachingDuration,
   getGoalGeometry,
   getSequenceTimelineMarkers,
   getTeamStyle,
@@ -154,9 +155,10 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
 
       if (activeCoachingMoment) {
         // In coaching moment: drill animation visually freezes; presentation timer advances
+        const effectiveFreezeDuration = getEffectiveCoachingDuration(activeCoachingMoment);
         setCoachingElapsed((prev) => {
           const next = prev + dt;
-          if (next >= activeCoachingMoment.duration) {
+          if (next >= effectiveFreezeDuration) {
             // Presentation duration finished: exit freeze and resume normal animation
             setActiveCoachingMoment(null);
             return 0;
@@ -316,7 +318,8 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
 
   const phaseState = useMemo(() => {
     if (!activeCoachingMoment) return null;
-    return getCoachingPhaseState(coachingElapsed, activeCoachingMoment.duration);
+    const effectiveDuration = getEffectiveCoachingDuration(activeCoachingMoment);
+    return getCoachingPhaseState(coachingElapsed, effectiveDuration);
   }, [activeCoachingMoment, coachingElapsed]);
 
   // Track sequence progress for multi-action coaching sequences (TASK D7B)
@@ -851,7 +854,7 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
                 className="text-[10px] text-stone-300 hover:text-white px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 transition-all font-medium whitespace-nowrap cursor-pointer shrink-0"
                 title="Bỏ qua phần giải thích và tiếp tục bài tập"
               >
-                Tiếp tục ({Math.max(0, activeCoachingMoment.duration - coachingElapsed).toFixed(1)}s)
+                Tiếp tục ({Math.max(0, getEffectiveCoachingDuration(activeCoachingMoment) - coachingElapsed).toFixed(1)}s)
               </button>
             </div>
             <p className="text-xs sm:text-sm text-stone-100 font-normal leading-relaxed line-clamp-3">

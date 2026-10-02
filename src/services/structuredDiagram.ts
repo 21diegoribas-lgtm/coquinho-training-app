@@ -573,11 +573,87 @@ export interface CoachingPhaseState {
 }
 
 /**
+ * Standard timing constants for coaching moment presentation (TASK FIX-A).
+ */
+export const MIN_COACHING_TOTAL_DURATION = 3.5;
+export const MAX_COACHING_TOTAL_DURATION = 5.5;
+export const COACHING_ENTER_DURATION = 0.7;
+export const COACHING_EXIT_DURATION = 0.7;
+export const MIN_COACHING_HOLD_DURATION = 2.0;
+
+export interface CoachingPhaseTiming {
+  enter: number;
+  hold: number;
+  exit: number;
+  total: number;
+}
+
+/**
+ * Pure helper that calculates enter, hold, and exit time allocations for a given presentation duration.
+ * Ensures enter is ~0.7s, exit is ~0.7s, and hold is at least 2.0s for any effective duration >= 3.5s.
+ */
+export function getCoachingPhaseTiming(duration: number): CoachingPhaseTiming {
+  const total = Math.max(0.1, duration);
+  const enter = total >= 1.9 ? COACHING_ENTER_DURATION : Math.min(COACHING_ENTER_DURATION, Math.round(total * 0.25 * 100) / 100);
+  const exit = total >= 1.9 ? COACHING_EXIT_DURATION : Math.min(COACHING_EXIT_DURATION, Math.round(total * 0.25 * 100) / 100);
+  const hold = Math.max(0, Math.round((total - enter - exit) * 100) / 100);
+  return { enter, hold, exit, total };
+}
+
+/**
+ * Pure helper for calculating the effective coaching presentation duration (TASK FIX-A).
+ * Ensures coaching points remain on screen long enough to be comfortably read,
+ * scaling deterministically based on title/text length while respecting strict bounds.
+ *
+ * Rules:
+ * - Minimum total duration: 3.5s (enter: 0.7s, hold: >= 2.0s, exit: 0.7s)
+ * - Maximum total duration: 5.5s
+ * - Short text (<= 45 chars): 3.5s total
+ * - Medium text (46–75 chars): 4.0s total; (76–105 chars): 4.5s total
+ * - Longer text (106–135 chars): 5.0s total; (> 135 chars): 5.5s total
+ * - Does NOT mutate stored coachingMoment.duration
+ */
+export function getEffectiveCoachingDuration(
+  momentOrText?: Partial<Pick<DiagramCoachingMoment, 'title' | 'text' | 'duration'>> | string | null
+): number {
+  if (!momentOrText) {
+    return MIN_COACHING_TOTAL_DURATION;
+  }
+
+  let fullText = '';
+  if (typeof momentOrText === 'string') {
+    fullText = momentOrText.trim();
+  } else if (typeof momentOrText === 'object') {
+    const title = typeof momentOrText.title === 'string' ? momentOrText.title.trim() : '';
+    const text = typeof momentOrText.text === 'string' ? momentOrText.text.trim() : '';
+    fullText = [title, text].filter(Boolean).join(' ').trim();
+  }
+
+  const charCount = fullText.length;
+
+  let duration: number;
+  if (charCount > 135) {
+    duration = 5.5;
+  } else if (charCount > 105) {
+    duration = 5.0;
+  } else if (charCount > 75) {
+    duration = 4.5;
+  } else if (charCount > 45) {
+    duration = 4.0;
+  } else {
+    duration = 3.5;
+  }
+
+  return Math.min(MAX_COACHING_TOTAL_DURATION, Math.max(MIN_COACHING_TOTAL_DURATION, duration));
+}
+
+export const calculateEffectiveCoachingDuration = getEffectiveCoachingDuration;
+
+/**
  * Calculates current visual presentation phase and continuous easing factors for camera, text, and highlight.
- * Timing allocation within coachingMoment.duration:
- * - enter: ~25% (progress 0.00 -> 0.25)
- * - hold:  ~50% (progress 0.25 -> 0.75)
- * - exit:  ~25% (progress 0.75 -> 1.00)
+ * Enter phase: ~0.7s camera ease-in and text reveal
+ * Hold phase: camera locked, text & highlight at 100% readability (minimum 2.0s hold)
+ * Exit phase: ~0.7s text fade-out and camera return to pitch view
  */
 export function getCoachingPhaseState(
   elapsed: number,
@@ -585,12 +661,13 @@ export function getCoachingPhaseState(
 ): CoachingPhaseState {
   const safeDuration = Math.max(0.1, duration);
   const progress = Math.max(0, Math.min(1, elapsed / safeDuration));
+  const timing = getCoachingPhaseTiming(safeDuration);
 
-  const ENTER_END = 0.25;
-  const HOLD_END = 0.75;
+  const enterEnd = timing.enter;
+  const holdEnd = timing.enter + timing.hold;
 
-  if (progress < ENTER_END) {
-    const phaseProgress = progress / ENTER_END;
+  if (elapsed < enterEnd) {
+    const phaseProgress = timing.enter > 0 ? Math.min(1, elapsed / timing.enter) : 1;
     const cameraEase = easeInOutCubic(phaseProgress);
     const highlightOpacity = easeInOutCubic(Math.min(1, phaseProgress * 1.3));
     // Text fades/slides in slightly after camera begins moving (phaseProgress > 0.3)
@@ -608,8 +685,8 @@ export function getCoachingPhaseState(
     };
   }
 
-  if (progress <= HOLD_END) {
-    const phaseProgress = (progress - ENTER_END) / (HOLD_END - ENTER_END);
+  if (elapsed <= holdEnd) {
+    const phaseProgress = timing.hold > 0 ? Math.min(1, (elapsed - enterEnd) / timing.hold) : 1;
     return {
       phase: 'hold',
       progress,
@@ -621,8 +698,9 @@ export function getCoachingPhaseState(
     };
   }
 
-  // Exit phase (0.75 -> 1.00)
-  const phaseProgress = (progress - HOLD_END) / (1 - HOLD_END);
+  // Exit phase (holdEnd -> safeDuration)
+  const exitElapsed = elapsed - holdEnd;
+  const phaseProgress = timing.exit > 0 ? Math.min(1, exitElapsed / timing.exit) : 1;
   // Text fades out first during the first half of the exit phase
   const textOpacity = 1 - easeInOutCubic(Math.min(1, phaseProgress * 2));
   // Camera eases out back to full pitch

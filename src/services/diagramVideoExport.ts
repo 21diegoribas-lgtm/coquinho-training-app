@@ -13,12 +13,15 @@ import {
   buildSemanticAnimation,
   buildWavyPath,
   calculateCameraViewBox,
+  COACHING_ENTER_DURATION,
+  COACHING_EXIT_DURATION,
   CoachingPhaseState,
   CoachingSequenceProgress,
   DEFAULT_POLISHED_MOTION_OPTIONS,
   formatCoachingOverlayText,
   getCoachingPhaseState,
   getCoachingSequenceProgress,
+  getEffectiveCoachingDuration,
   getGoalGeometry,
   getTeamStyle,
   interpolateAnimationState,
@@ -303,7 +306,10 @@ export function calculateExportDuration(
   }
 
   const exportMoments = getExportCoachingMoments(animation);
-  const coachingDuration = exportMoments.reduce((sum, m) => sum + (m.duration || 0), 0);
+  const coachingDuration = exportMoments.reduce(
+    (sum, m) => sum + getEffectiveCoachingDuration(m),
+    0
+  );
   return Math.round((animation.duration + coachingDuration) * 100) / 100;
 }
 
@@ -364,7 +370,7 @@ export function mapPresentationTimeToTimeline(
     prevDrillTime = m.time;
 
     // 2. Coaching freeze segment during this coaching moment
-    const momentFreezeDuration = m.duration;
+    const momentFreezeDuration = getEffectiveCoachingDuration(m);
     if (safePresTime < currentPresCursor + momentFreezeDuration) {
       drillTime = m.time;
       activeMoment = m;
@@ -385,7 +391,7 @@ export function mapPresentationTimeToTimeline(
 
   // Calculate phase state if in a coaching moment
   const phaseState = activeMoment
-    ? getCoachingPhaseState(coachingElapsed, activeMoment.duration)
+    ? getCoachingPhaseState(coachingElapsed, getEffectiveCoachingDuration(activeMoment))
     : null;
 
   // Calculate camera viewBox (reuses existing D6 calculateCameraViewBox and interpolateViewBox)
@@ -453,13 +459,14 @@ export function buildNarrationTimeline(
     currentPresCursor += drillRun;
     prevDrillTime = m.time;
 
+    const effectiveDuration = getEffectiveCoachingDuration(m);
     // Coaching moment presentation begins at currentPresCursor
-    // Hold phase starts after enter transition (~25% into duration, min 0.2s, max 0.6s)
-    const enterDelay = Math.max(0.2, Math.min(0.6, Math.round(m.duration * 0.25 * 100) / 100));
+    // Hold phase starts after enter transition (~0.7s)
+    const enterDelay = COACHING_ENTER_DURATION;
     const startPresentationTime = Math.round((currentPresCursor + enterDelay) * 100) / 100;
 
-    // Duration covers the hold window (~65% of moment presentation time)
-    const slotDuration = Math.max(0.5, Math.round((m.duration - enterDelay - 0.2) * 100) / 100);
+    // Duration covers the hold window (effectiveDuration - enterDelay - exitDelay)
+    const slotDuration = Math.max(0.5, Math.round((effectiveDuration - enterDelay - COACHING_EXIT_DURATION) * 100) / 100);
 
     slots.push({
       id: `narr-${m.id || i + 1}`,
@@ -472,7 +479,7 @@ export function buildNarrationTimeline(
       event: m.event,
     });
 
-    currentPresCursor += m.duration;
+    currentPresCursor += effectiveDuration;
   }
 
   return slots;

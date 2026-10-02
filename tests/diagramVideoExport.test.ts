@@ -24,10 +24,13 @@ import {
 import {
   buildDefaultStructuredDiagram,
   buildSemanticAnimation,
+  COACHING_ENTER_DURATION,
+  COACHING_EXIT_DURATION,
   DEFAULT_POLISHED_MOTION_OPTIONS,
+  getEffectiveCoachingDuration,
   interpolateAnimationState,
 } from '../src/services/structuredDiagram';
-import { DiagramAnimation, StructuredDrillDiagram } from '../src/types/session';
+import { DiagramAnimation, DiagramCoachingMoment, StructuredDrillDiagram } from '../src/types/session';
 
 // =============================================================================
 // TASK D8B1 & D8B2 TESTS: VIDEO EXPORT FOUNDATION & HARDENING
@@ -58,7 +61,7 @@ test('D8B1: filename sanitization and video filename generation', () => {
 });
 
 test('D8B1: calculateExportDuration includes coaching presentation duration without mutating animation', () => {
-  // 1. Drill animation duration 8s, two 2s coaching moments => total 12s
+  // 1. Drill animation duration 8s, two coaching moments (short text -> 3.5s effective each) => total 15s
   const anim: DiagramAnimation = {
     duration: 8.0,
     steps: [
@@ -82,10 +85,12 @@ test('D8B1: calculateExportDuration includes coaching presentation duration with
   };
 
   const total = calculateExportDuration(anim);
-  assert.equal(total, 12.0);
+  assert.equal(total, 15.0);
   assert.equal(anim.duration, 8.0, 'Original animation.duration must NOT be mutated');
+  assert.equal(anim.coachingMoments![0].duration, 2.0, 'Original coachingMoment.duration must NOT be mutated');
+  assert.equal(anim.coachingMoments![1].duration, 2.0, 'Original coachingMoment.duration must NOT be mutated');
 
-  // 2. Animation with sequence: honors sequence moments
+  // 2. Animation with sequence: honors sequence moments with effective durations (short text -> 3.5s each)
   const animWithSeq: DiagramAnimation = {
     duration: 6.0,
     steps: [],
@@ -101,8 +106,8 @@ test('D8B1: calculateExportDuration includes coaching presentation duration with
     },
   };
 
-  // Only c1 (1.2s) and c2 (1.5s) are in the sequence => 6.0 + 1.2 + 1.5 = 8.7s
-  assert.equal(calculateExportDuration(animWithSeq), 8.7);
+  // Only c1 (3.5s) and c2 (3.5s) are in the sequence => 6.0 + 3.5 + 3.5 = 13.0s
+  assert.equal(calculateExportDuration(animWithSeq), 13.0);
 
   // 3. Animation with no coaching moments => export duration = drill duration
   const animNoCoach: DiagramAnimation = {
@@ -173,7 +178,7 @@ test('D8B1: mapPresentationTimeToTimeline maps drill-time and freeze intervals d
 
   const anim = diag.animation!;
   const totalDuration = calculateExportDuration(anim);
-  assert.equal(totalDuration, 10.0); // 8s drill + 2s coaching freeze
+  assert.equal(totalDuration, 12.0); // 8s drill + 4.0s effective coaching freeze (53 chars text)
 
   // 1. Initial frame: t_pres = 0s
   const frame0 = mapPresentationTimeToTimeline(0, anim, diag);
@@ -198,12 +203,12 @@ test('D8B1: mapPresentationTimeToTimeline maps drill-time and freeze intervals d
   assert.equal(frame2.activeMoment?.id, 'cm1');
   assert.equal(frame2.coachingElapsed, 0);
 
-  // 4. Midpoint of coaching freeze: t_pres = 3.0s (1.0s into freeze)
-  const frame3 = mapPresentationTimeToTimeline(3.0, anim, diag);
+  // 4. Hold phase of coaching freeze: t_pres = 4.0s (2.0s into freeze)
+  const frame3 = mapPresentationTimeToTimeline(4.0, anim, diag);
   assert.equal(frame3.drillTime, 2.0, 'Drill time MUST remain frozen at 2.0s');
   assert.equal(frame3.isFrozen, true);
   assert.equal(frame3.activeMoment?.id, 'cm1');
-  assert.equal(frame3.coachingElapsed, 1.0);
+  assert.equal(frame3.coachingElapsed, 2.0);
   assert.equal(frame3.phaseState?.phase, 'hold');
   assert.equal(frame3.phaseState?.cameraEase, 1.0);
   // Camera zoomed into player p2 at (600, 180) with zoom 2.0 => width=500, height=300 => minX=350, minY=30
@@ -211,22 +216,22 @@ test('D8B1: mapPresentationTimeToTimeline maps drill-time and freeze intervals d
   // Ball position stays frozen mid-flight
   assert.equal(frame3.interpolatedState.balls[0].x, 40);
 
-  // 5. End of coaching freeze / start of resumption: t_pres = 4.0s
-  const frame4 = mapPresentationTimeToTimeline(4.0, anim, diag);
+  // 5. End of coaching freeze / start of resumption: t_pres = 6.0s (2.0 + 4.0s)
+  const frame4 = mapPresentationTimeToTimeline(6.0, anim, diag);
   assert.equal(frame4.drillTime, 2.0, 'Resumes from exact timestamp 2.0s');
   assert.equal(frame4.isFrozen, false);
   assert.equal(frame4.activeMoment, null);
 
-  // 6. Resumed drill playback: t_pres = 6.0s (2.0s after freeze ended)
+  // 6. Resumed drill playback: t_pres = 8.0s (2.0s after freeze ended)
   // Drill has advanced by 2.0s from 2.0s => drillTime = 4.0s
-  const frame5 = mapPresentationTimeToTimeline(6.0, anim, diag);
+  const frame5 = mapPresentationTimeToTimeline(8.0, anim, diag);
   assert.equal(frame5.drillTime, 4.0);
   assert.equal(frame5.isFrozen, false);
   assert.equal(frame5.activeMoment, null);
   assert.equal(frame5.cameraViewBox, '0 0 1000 600');
 
-  // 7. Final frame: t_pres = 10.0s => drillTime = 8.0s (animation duration)
-  const frameFinal = mapPresentationTimeToTimeline(10.0, anim, diag);
+  // 7. Final frame: t_pres = 12.0s => drillTime = 8.0s (animation duration)
+  const frameFinal = mapPresentationTimeToTimeline(12.0, anim, diag);
   assert.equal(frameFinal.drillTime, 8.0);
   assert.equal(frameFinal.isFrozen, false);
   assert.equal(frameFinal.interpolatedState.players[1].x, 80);
@@ -442,20 +447,20 @@ test('D8B2: buildNarrationTimeline generates presentation-time slots during coac
   assert.equal(slots.length, 2);
 
   // Slot 1: Moment 1 triggers at presentation time 2.0s
-  // Enter delay is ~0.5s (25% of 2.0s) => narration starts at 2.0 + 0.5 = 2.5s (during hold phase)
+  // Enter delay is 0.7s (COACHING_ENTER_DURATION) => narration starts at 2.0 + 0.7 = 2.7s (during hold phase)
   assert.equal(slots[0].id, 'narr-c1');
   assert.equal(slots[0].momentId, 'c1');
-  assert.equal(slots[0].startPresentationTime, 2.5);
-  assert.ok(slots[0].duration > 1.0);
+  assert.equal(slots[0].startPresentationTime, 2.7);
+  assert.equal(slots[0].duration, 2.1); // 3.5s total - 0.7s enter - 0.7s exit = 2.1s hold
   assert.equal(slots[0].text, 'Kiểm tra vai trước khi đón bóng');
 
   // Slot 2: Moment 2 drill time is 5.0s.
-  // Moment 1 presentation added 2.0s => Moment 2 starts at pres time 2.0 + 2.0 + (5.0 - 2.0) = 7.0s!
-  // Enter delay is 0.5s => narration starts at 7.0 + 0.5 = 7.5s
+  // Moment 1 effective presentation is 3.5s => Moment 2 starts at pres time 2.0 + 3.5 + (5.0 - 2.0) = 8.5s!
+  // Enter delay is 0.7s => narration starts at 8.5 + 0.7 = 9.2s
   assert.equal(slots[1].id, 'narr-c2');
   assert.equal(slots[1].momentId, 'c2');
-  assert.equal(slots[1].startPresentationTime, 7.5);
-  assert.ok(slots[1].duration > 1.0);
+  assert.equal(slots[1].startPresentationTime, 9.2);
+  assert.equal(slots[1].duration, 2.1);
   assert.equal(slots[1].text, 'Mở thân người đón bóng');
 
   // Slots do not overlap in presentation timeline
@@ -642,3 +647,58 @@ test('D8B2 TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 
   assert.equal(preflight.valid, true);
   assert.equal(preflight.totalDuration, totalDuration);
 });
+
+test('FIX-A: interactive playback and exported video use identical effective duration', () => {
+  const cm: DiagramCoachingMoment = {
+    id: 'coach-consistency',
+    time: 3.0,
+    duration: 1.5, // stored duration
+    playerId: 'p1',
+    title: 'Kiểm tra vai',
+    text: 'Quan sát và kiểm tra vai trước khi đón bóng từ đồng đội',
+  };
+
+  const anim: DiagramAnimation = {
+    duration: 10.0,
+    steps: [{ id: 's1', start: 0, duration: 5, actions: [] }],
+    coachingMoments: [cm],
+  };
+
+  const diag: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [{ id: 'p1', team: 'blue', x: 30, y: 30 }],
+    balls: [],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [],
+    animation: anim,
+  };
+
+  // 1. Both derive exact same effective duration
+  const interactiveDuration = getEffectiveCoachingDuration(cm);
+  assert.ok(interactiveDuration >= 3.5);
+  assert.equal(cm.duration, 1.5, 'Stored duration was not modified');
+
+  // 2. Export duration incorporates exact same effective duration
+  const exportDuration = calculateExportDuration(anim);
+  assert.equal(exportDuration, Math.round((anim.duration + interactiveDuration) * 100) / 100);
+
+  // 3. Presentation timeline freezes for exact same duration
+  const presTrigger = 3.0; // drillTime = 3.0
+  const mappingTrigger = mapPresentationTimeToTimeline(presTrigger, anim, diag);
+  assert.equal(mappingTrigger.isFrozen, true);
+  assert.equal(mappingTrigger.activeMoment?.id, 'coach-consistency');
+
+  // At end of freeze
+  const mappingEnd = mapPresentationTimeToTimeline(presTrigger + interactiveDuration, anim, diag);
+  assert.equal(mappingEnd.isFrozen, false);
+  assert.equal(mappingEnd.drillTime, 3.0);
+
+  // 4. Narration timeline uses exact same effective duration and starts at enter transition
+  const narrSlots = buildNarrationTimeline(anim);
+  assert.equal(narrSlots.length, 1);
+  assert.equal(narrSlots[0].startPresentationTime, presTrigger + COACHING_ENTER_DURATION);
+  assert.equal(narrSlots[0].duration, Math.round((interactiveDuration - COACHING_ENTER_DURATION - COACHING_EXIT_DURATION) * 100) / 100);
+});
+
