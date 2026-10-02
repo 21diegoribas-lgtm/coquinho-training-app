@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Play, Pause, RotateCcw } from 'lucide-react';
+import { Play, Pause, RotateCcw, Video } from 'lucide-react';
 import {
   DiagramCoachingMoment,
   DiagramGoal,
@@ -26,6 +26,10 @@ import {
   shouldTriggerCoachingMoment,
   updateSeekTriggerState,
 } from '../services/structuredDiagram';
+import {
+  exportAndDownloadDiagramVideo,
+  isBrowserVideoExportSupported,
+} from '../services/diagramVideoExport';
 
 interface PitchDiagramProps {
   data?: PitchDiagramData;
@@ -33,6 +37,8 @@ interface PitchDiagramProps {
   className?: string;
   isSimulating?: boolean;
   highlightPlayerId?: string;
+  topic?: string;
+  exerciseName?: string;
 }
 
 export const PitchDiagram: React.FC<PitchDiagramProps> = ({
@@ -41,6 +47,8 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
   className = '',
   isSimulating = false,
   highlightPlayerId,
+  topic,
+  exerciseName,
 }) => {
   // Ưu tiên sử dụng structured diagram (D1/D2); nếu không có thì fallback về pitchDiagram legacy
   const hasStructuredDiagram = Boolean(
@@ -60,6 +68,8 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
         className={className}
         highlightPlayerId={highlightPlayerId}
         isSimulating={isSimulating}
+        topic={topic}
+        exerciseName={exerciseName}
       />
     );
   }
@@ -82,6 +92,8 @@ interface StructuredViewProps {
   className?: string;
   highlightPlayerId?: string;
   isSimulating?: boolean;
+  topic?: string;
+  exerciseName?: string;
 }
 
 const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
@@ -89,6 +101,8 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
   className = '',
   highlightPlayerId,
   isSimulating = false,
+  topic,
+  exerciseName,
 }) => {
   // Hệ tọa độ logic chuẩn 1000 x 600 (tỷ lệ 5:3 khớp pitch width 100 / height 60)
   const toX = (pct: number) => {
@@ -197,6 +211,72 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
   const handleSkipCoachingMoment = () => {
     setActiveCoachingMoment(null);
     setCoachingElapsed(0);
+  };
+
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [exportPercent, setExportPercent] = useState<number>(0);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const exportControllerRef = useRef<{ cancel: () => void } | null>(null);
+
+  // Dọn dẹp export controller khi unmount
+  useEffect(() => {
+    return () => {
+      if (exportControllerRef.current) {
+        exportControllerRef.current.cancel();
+        exportControllerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleStartExport = () => {
+    if (isExporting) return;
+    setExportError(null);
+
+    const support = isBrowserVideoExportSupported();
+    if (!support.supported) {
+      setExportError(support.reason || 'Trình duyệt chưa hỗ trợ quay video WebM');
+      setTimeout(() => setExportError(null), 3500);
+      return;
+    }
+
+    setIsExporting(true);
+    setExportPercent(0);
+
+    const controller = exportAndDownloadDiagramVideo(diagram, {
+      exerciseName: exerciseName || topic,
+      topic,
+      onProgress: (p) => {
+        setExportPercent(p.percent);
+      },
+    });
+
+    exportControllerRef.current = controller;
+
+    controller.promise
+      .then((success) => {
+        if (!success) {
+          // Cancelled or completed
+        }
+      })
+      .catch((err) => {
+        console.error('Lỗi khi xuất video bài tập:', err);
+        setExportError('Xuất video không thành công');
+        setTimeout(() => setExportError(null), 3500);
+      })
+      .finally(() => {
+        setIsExporting(false);
+        setExportPercent(0);
+        exportControllerRef.current = null;
+      });
+  };
+
+  const handleCancelExport = () => {
+    if (exportControllerRef.current) {
+      exportControllerRef.current.cancel();
+      exportControllerRef.current = null;
+    }
+    setIsExporting(false);
+    setExportPercent(0);
   };
 
   const handleSeek = (newTime: number) => {
@@ -848,6 +928,43 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
                 );
               })}
             </div>
+
+            {/* Phân cách */}
+            <div className="h-3 w-[1px] bg-white/20 ml-0.5" />
+
+            {/* Nút Xuất video & Tiến trình xuất (TASK D8B1) */}
+            {isExporting ? (
+              <div className="flex items-center gap-1.5 text-[11px] text-amber-300 font-mono pl-0.5">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>Đang xuất {exportPercent}%</span>
+                <button
+                  type="button"
+                  onClick={handleCancelExport}
+                  className="px-1.5 py-0.5 rounded bg-white/10 hover:bg-red-500/80 text-[10px] text-stone-200 hover:text-white transition-colors cursor-pointer"
+                  title="Hủy quá trình xuất video"
+                >
+                  Hủy
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleStartExport}
+                className="flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 active:scale-95 px-2 py-0.5 text-[11px] font-medium text-amber-300 hover:text-amber-200 transition-all cursor-pointer"
+                title="Xuất video mô phỏng bài tập (.webm)"
+              >
+                <Video className="h-3 w-3 text-amber-400" />
+                <span className="hidden sm:inline">Xuất video</span>
+                <span className="sm:hidden">Video</span>
+              </button>
+            )}
+
+            {/* Thông báo lỗi xuất video nếu có */}
+            {exportError && (
+              <span className="text-[10px] text-red-300 max-w-[120px] truncate" title={exportError}>
+                {exportError}
+              </span>
+            )}
           </div>
         )}
 

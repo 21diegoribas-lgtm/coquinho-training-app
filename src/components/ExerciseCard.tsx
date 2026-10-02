@@ -165,6 +165,7 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
                   diagram={exercise.diagram}
                   data={exercise.pitchDiagram}
                   isSimulating={isSimulating}
+                  exerciseName={exercise.exerciseName}
                 />
               </div>
 
