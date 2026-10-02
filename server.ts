@@ -1173,6 +1173,114 @@ app.post('/api/generate-plan', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Text-to-Speech (TTS) Proxy Endpoint (TASK TTS-A3a).
+ * 
+ * Secure server-side proxy converting Vietnamese narration text into audio/mpeg bytes.
+ * Never exposes API keys or secrets to the browser.
+ * Returns 503 TTS_UNAVAILABLE when no external TTS provider is configured in environment.
+ */
+app.post('/api/tts', async (req: Request, res: Response) => {
+  try {
+    const { text, language = 'vi-VN', voice, model } = req.body || {};
+
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Văn bản đọc (text) là bắt buộc.' });
+    }
+
+    const cleanText = text.trim();
+    if (cleanText.length === 0) {
+      return res.status(400).json({ error: 'Văn bản đọc không được để trống.' });
+    }
+
+    // Length safety clamp (max 300 characters)
+    const safeText = cleanText.slice(0, 300);
+
+    const ttsProvider = process.env.TTS_PROVIDER;
+    const ttsApiKey = process.env.TTS_API_KEY;
+    const ttsVoice = voice || process.env.TTS_VOICE || 'vi-VN-Standard-A';
+    const ttsModel = model || process.env.TTS_MODEL;
+
+    // Check if an external TTS provider is configured
+    if (!ttsProvider && !ttsApiKey) {
+      // Graceful unavailable behavior when no external TTS provider is configured
+      return res.status(503).json({
+        error: 'Dịch vụ Text-to-Speech (TTS) chưa được cấu hình trên máy chủ.',
+        code: 'TTS_UNAVAILABLE',
+      });
+    }
+
+    // Google Cloud Text-to-Speech REST API
+    if (ttsProvider === 'google-cloud' || ttsProvider === 'google') {
+      const response = await fetch(
+        `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ttsApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            input: { text: safeText },
+            voice: { languageCode: language, name: ttsVoice },
+            audioConfig: { audioEncoding: 'MP3' },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error('[tts] Google Cloud TTS error:', response.status, errText);
+        return res.status(response.status).json({ error: 'Lỗi từ dịch vụ TTS', details: errText });
+      }
+
+      const data = (await response.json()) as { audioContent?: string };
+      if (!data.audioContent) {
+        return res.status(502).json({ error: 'Không nhận được dữ liệu âm thanh từ TTS' });
+      }
+
+      const audioBuffer = Buffer.from(data.audioContent, 'base64');
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Length', audioBuffer.length);
+      return res.send(audioBuffer);
+    }
+
+    // OpenAI TTS
+    if (ttsProvider === 'openai') {
+      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ttsApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: ttsModel || 'tts-1',
+          input: safeText,
+          voice: ttsVoice || 'alloy',
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error('[tts] OpenAI TTS error:', response.status, errText);
+        return res.status(response.status).json({ error: 'Lỗi từ dịch vụ TTS', details: errText });
+      }
+
+      const arrayBuf = await response.arrayBuffer();
+      const audioBuffer = Buffer.from(arrayBuf);
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Length', audioBuffer.length);
+      return res.send(audioBuffer);
+    }
+
+    // Unrecognized provider
+    return res.status(503).json({
+      error: `Nhà cung cấp TTS '${ttsProvider}' chưa được hỗ trợ.`,
+      code: 'TTS_UNSUPPORTED_PROVIDER',
+    });
+  } catch (err: any) {
+    console.error('[tts] Server error:', err?.message || err);
+    return res.status(500).json({ error: 'Lỗi hệ thống khi xử lý giọng nói.' });
+  }
+});
+
 app.use((error: any, _req: Request, res: Response, _next: express.NextFunction) => {
   console.error('[api] Request failed', { status: error?.status, name: error?.name });
   res.status(error?.status === 400 ? 400 : 500).json({ error: 'Yêu cầu không hợp lệ. Vui lòng thử lại.' });

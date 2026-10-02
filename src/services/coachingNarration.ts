@@ -669,3 +669,15 @@ export async function prepareNarrationAudioTrack(
     scheduledClipsCount,
   };
 }
+
+// Re-export concrete browser narration audio provider (TASK TTS-A3a)
+export {
+  createBrowserNarrationAudioProvider,
+  clearNarrationAudioCache,
+  getNarrationAudioCacheSize,
+  DEFAULT_TTS_LANGUAGE,
+  DEFAULT_TTS_VOICE,
+  MAX_TTS_TEXT_LENGTH,
+  DEFAULT_TTS_ENDPOINT,
+} from './narrationAudioProvider';
+export type { BrowserNarrationAudioProviderOptions } from './narrationAudioProvider';
