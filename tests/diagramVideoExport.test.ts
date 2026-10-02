@@ -8,6 +8,8 @@ import {
   combineMediaStreamTracks,
   DEFAULT_VIDEO_BITS_PER_SECOND,
   evaluateMediaExportCapability,
+  exportAndDownloadDiagramVideo,
+  exportDiagramToVideoBlob,
   generateVideoFilename,
   getExportCoachingMoments,
   getRepresentationDisplayLabel,
@@ -22,6 +24,12 @@ import {
   validateExportPreconditions,
   VideoExportResult,
 } from '../src/services/diagramVideoExport';
+import {
+  buildCoachingNarrationTimeline,
+  createBrowserNarrationAudioProvider,
+  CoachingNarrationItem,
+  NarrationAudioProvider,
+} from '../src/services/coachingNarration';
 import {
   buildDefaultStructuredDiagram,
   buildSemanticAnimation,
@@ -911,5 +919,580 @@ test('REP-B TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7
   assert.ok(svg.includes('8 cặp thực hiện đồng thời'));
   assert.equal(mapping.interpolatedState.players.length, 2);
   assert.equal(mapping.interpolatedState.balls.length, 1);
+});
+
+// =============================================================================
+// TASK TTS-A3b: MOCK BROWSER INFRASTRUCTURE & TESTS FOR NARRATION VIDEO EXPORT
+// =============================================================================
+
+class MockAudioBuffer {
+  duration: number;
+  sampleRate = 44100;
+  numberOfChannels = 1;
+  length: number;
+  constructor(options: { duration: number }) {
+    this.duration = options.duration;
+    this.length = Math.round(this.duration * this.sampleRate);
+  }
+}
+
+class MockAudioBufferSourceNode {
+  buffer: any = null;
+  loop = false;
+  state = 'idle';
+  connect(dest: any) { return dest; }
+  disconnect() {}
+  start() { this.state = 'started'; }
+  stop() { this.state = 'stopped'; }
+}
+
+class MockGainNode {
+  gain = { value: 1.0, setValueAtTime: (v: number) => { this.gain.value = v; } };
+  connect(dest: any) { return dest; }
+  disconnect() {}
+}
+
+class MockAudioDestinationNode {
+  stream = new MockMediaStream([new MockMediaStreamTrack('audio')]);
+  connect(dest: any) { return dest; }
+  disconnect() {}
+}
+
+class MockAudioContext {
+  currentTime = 0;
+  state: AudioContextState = 'running';
+  createBufferSource() { return new MockAudioBufferSourceNode(); }
+  createGain() { return new MockGainNode(); }
+  createMediaStreamDestination() { return new MockAudioDestinationNode(); }
+  async close() { this.state = 'closed'; }
+  async resume() { this.state = 'running'; }
+}
+
+class MockMediaStreamTrack {
+  kind: string;
+  readyState: 'live' | 'ended' = 'live';
+  id = 'track-' + Math.random().toString(36).substring(2, 9);
+  constructor(kind: string = 'video') {
+    this.kind = kind;
+  }
+  stop() {
+    this.readyState = 'ended';
+  }
+}
+
+class MockMediaStream {
+  tracks: MockMediaStreamTrack[] = [];
+  constructor(tracks?: MockMediaStreamTrack[]) {
+    if (tracks) this.tracks = [...tracks];
+  }
+  getVideoTracks() { return this.tracks.filter((t) => t.kind === 'video'); }
+  getAudioTracks() { return this.tracks.filter((t) => t.kind === 'audio'); }
+  getTracks() { return [...this.tracks]; }
+  addTrack(t: MockMediaStreamTrack) { this.tracks.push(t); }
+}
+
+class MockMediaRecorder {
+  static isTypeSupported(mime: string) { return mime.includes('webm'); }
+  stream: MockMediaStream;
+  options: any;
+  state: 'inactive' | 'recording' | 'paused' = 'inactive';
+  mimeType = 'video/webm;codecs=vp9';
+  ondataavailable: ((e: any) => void) | null = null;
+  onstop: (() => void) | null = null;
+  onerror: ((e: any) => void) | null = null;
+  static lastCreatedInstance: MockMediaRecorder | null = null;
+
+  constructor(stream: MockMediaStream, options?: any) {
+    this.stream = stream;
+    this.options = options;
+    MockMediaRecorder.lastCreatedInstance = this;
+  }
+
+  start(_timeslice?: number) {
+    this.state = 'recording';
+    if (this.ondataavailable) {
+      this.ondataavailable({ data: new Blob(['mock-webm'], { type: this.mimeType }) });
+    }
+  }
+
+  requestData() {
+    if (this.ondataavailable) {
+      this.ondataavailable({ data: new Blob(['mock-chunk'], { type: this.mimeType }) });
+    }
+  }
+
+  stop() {
+    this.state = 'inactive';
+    if (this.onstop) {
+      this.onstop();
+    }
+  }
+}
+
+function setupMockExportEnvironment() {
+  const origWindow = (globalThis as any).window;
+  const origDocument = (globalThis as any).document;
+  const origMediaRecorder = (globalThis as any).MediaRecorder;
+  const origMediaStream = (globalThis as any).MediaStream;
+  const origImage = (globalThis as any).Image;
+  const origURL = (globalThis as any).URL;
+  const origAudioContext = (globalThis as any).AudioContext;
+  const origSetTimeout = globalThis.setTimeout;
+
+  class MockImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    set src(_val: string) {
+      if (this.onload) {
+        this.onload();
+      }
+    }
+  }
+
+  const mockCanvas = {
+    width: 1200,
+    height: 720,
+    getContext: () => ({
+      clearRect: () => {},
+      drawImage: () => {},
+    }),
+    captureStream: () => new MockMediaStream([new MockMediaStreamTrack('video')]),
+  };
+
+  (globalThis as any).MediaStream = MockMediaStream;
+  (globalThis as any).MediaRecorder = MockMediaRecorder;
+  (globalThis as any).Image = MockImage;
+  (globalThis as any).AudioContext = MockAudioContext;
+  (globalThis as any).window = {
+    MediaRecorder: MockMediaRecorder,
+    MediaStream: MockMediaStream,
+    AudioContext: MockAudioContext,
+  };
+  (globalThis as any).document = {
+    createElement: (tag: string) => {
+      if (tag === 'canvas') return mockCanvas;
+      return {};
+    },
+  };
+  (globalThis as any).URL.createObjectURL = () => 'blob:http://localhost:3000/mock';
+  (globalThis as any).URL.revokeObjectURL = () => {};
+
+  // Accelerate frame pacing for test speed
+  (globalThis as any).setTimeout = ((handler: any, _ms?: number, ...args: any[]) => {
+    return origSetTimeout(handler, 0, ...args);
+  }) as any;
+
+  return () => {
+    (globalThis as any).window = origWindow;
+    (globalThis as any).document = origDocument;
+    (globalThis as any).MediaRecorder = origMediaRecorder;
+    (globalThis as any).MediaStream = origMediaStream;
+    (globalThis as any).Image = origImage;
+    (globalThis as any).URL = origURL;
+    (globalThis as any).AudioContext = origAudioContext;
+    globalThis.setTimeout = origSetTimeout;
+  };
+}
+
+// =============================================================================
+// TASK TTS-A3b TESTS: NARRATION AUDIO INTEGRATION INTO VIDEO EXPORT
+// =============================================================================
+
+test('TTS-A3b: narration preparation before export requests items in coaching order', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    const requestedItems: string[] = [];
+    const provider: NarrationAudioProvider = async (item) => {
+      requestedItems.push(item.text);
+      return new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+    };
+
+    let statusEmitted = '';
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: provider,
+      onNarrationStatus: (s) => {
+        statusEmitted = s;
+      },
+    });
+
+    const result = await controller.promise;
+    assert.ok(result);
+
+    // Verify exactly 3 narration items requested in coaching order
+    assert.equal(requestedItems.length, 3);
+    assert.equal(requestedItems[0], 'Kiểm tra vai trước khi bóng đến.');
+    assert.equal(requestedItems[1], 'Mở thân người để hướng về phía chơi tiếp theo.');
+    assert.equal(requestedItems[2], 'Chạm bước một đưa bóng vào không gian thuận lợi.');
+
+    // Verify narration status UI was emitted
+    assert.equal(statusEmitted, 'Đang chuẩn bị giọng đọc...');
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: narration audio track passed into recorder MediaStream (video + audio)', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    const provider: NarrationAudioProvider = async () =>
+      new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: provider,
+    });
+
+    const result = await controller.promise;
+    assert.ok(result);
+
+    // Verify result metadata
+    assert.equal(result.hasAudio, true, 'Result must indicate hasAudio = true');
+
+    // Verify recorder stream included audio track
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    assert.ok(recorderInstance.stream.getVideoTracks().length >= 1, 'Stream must have video track');
+    assert.ok(recorderInstance.stream.getAudioTracks().length === 1, 'Stream must have exactly 1 audio track');
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: silent fallback on total TTS failure or missing provider', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    // Provider fails for all items
+    const failProvider: NarrationAudioProvider = async () => null;
+
+    let warningEmitted = '';
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: failProvider,
+      onNarrationWarning: (w) => {
+        warningEmitted = w;
+      },
+    });
+
+    const result = await controller.promise;
+    assert.ok(result, 'Video export must still succeed without audio');
+    assert.equal(result.hasAudio, false, 'hasAudio must be false on silent fallback');
+
+    // Verify warning message
+    assert.equal(warningEmitted, 'Không thể tạo giọng đọc. Video sẽ được xuất không có âm thanh.');
+
+    // Verify recorder stream has only video track
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    assert.equal(recorderInstance.stream.getAudioTracks().length, 0, 'Stream must have 0 audio tracks');
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: partial narration success retains available audio track', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    // Clip 2 fails, clips 1 and 3 succeed
+    const partialProvider: NarrationAudioProvider = async (item) => {
+      if (item.coachingMomentId === 'coach2') return null;
+      return new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+    };
+
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: partialProvider,
+    });
+
+    const result = await controller.promise;
+    assert.ok(result);
+    assert.equal(result.hasAudio, true, 'Partial success must still retain audio');
+
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    assert.equal(recorderInstance.stream.getAudioTracks().length, 1);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: cancellation during narration preparation halts export and cleans resources', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    let controllerRef: any = null;
+    let providerCalled = false;
+
+    const slowProvider: NarrationAudioProvider = async () => {
+      providerCalled = true;
+      // Allow controller assignment to complete before triggering cancel
+      await new Promise((r) => setTimeout(r, 5));
+      if (controllerRef) {
+        controllerRef.cancel();
+      }
+      return new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+    };
+
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: slowProvider,
+    });
+    controllerRef = controller;
+
+    const result = await controller.promise;
+    assert.equal(result, null, 'Cancelled export must resolve to null');
+    assert.equal(providerCalled, true);
+
+    // Repeated cancel must not throw
+    assert.doesNotThrow(() => {
+      controller.cancel();
+    });
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: cancellation during recording stops audio and video tracks', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    const provider: NarrationAudioProvider = async () =>
+      new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+
+    let controllerRef: any = null;
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: provider,
+      onProgress: (p) => {
+        if (p.stage === 'rendering' && p.frame === 0) {
+          controllerRef.cancel();
+        }
+      },
+    });
+    controllerRef = controller;
+
+    const result = await controller.promise;
+    assert.equal(result, null, 'Must resolve to null when cancelled during recording');
+
+    // Verify recorder stopped
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    assert.equal(recorderInstance.state, 'inactive');
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: cleanup after successful export terminates audio track and does not leak', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    const provider: NarrationAudioProvider = async () =>
+      new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: provider,
+    });
+
+    const result = await controller.promise;
+    assert.ok(result);
+
+    // Verify stream tracks were stopped
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    const audioTracks = recorderInstance.stream.getAudioTracks();
+    assert.equal(audioTracks.length, 1);
+    assert.equal(audioTracks[0].readyState, 'ended', 'Audio track must be ended after export');
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('TTS-A3b: timeline consistency: export duration and freeze timing remain unchanged with audio', () => {
+  const repDiagram = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+    representationMode: 'representative-group',
+  });
+
+  const anim = repDiagram.animation!;
+  const exportDurationWithoutAudio = calculateExportDuration(anim);
+  const narrationItems = buildCoachingNarrationTimeline(anim);
+
+  // Verify narration does not extend video duration
+  for (const item of narrationItems) {
+    const itemEnd = item.startPresentationTime + item.maxDuration;
+    assert.ok(
+      itemEnd <= exportDurationWithoutAudio,
+      `Item end (${itemEnd}) must be <= total export duration (${exportDurationWithoutAudio})`
+    );
+  }
+
+  // Verify coaching freeze timing
+  const moments = anim.coachingMoments!;
+  assert.equal(moments.length, 3);
+  for (let i = 0; i < moments.length; i++) {
+    const m = moments[i];
+    const n = narrationItems[i];
+    // Narration starts after enter delay in hold phase
+    assert.ok(n.startPresentationTime > m.time);
+  }
+});
+
+test('TTS-A3b TEST CASE: 16 players, 8 groups of 2, Nhận bóng mở thân người full 10-point verification', async () => {
+  const restoreEnv = setupMockExportEnvironment();
+  try {
+    const repDiagram = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'representative-group',
+    });
+
+    const anim = repDiagram.animation!;
+    assert.ok(anim && anim.coachingMoments);
+
+    // Point 1: exactly 3 narration items requested
+    const calledItems: CoachingNarrationItem[] = [];
+    const provider: NarrationAudioProvider = async (item) => {
+      calledItems.push(item);
+      return new MockAudioBuffer({ duration: 1.8 }) as unknown as AudioBuffer;
+    };
+
+    const controller = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: provider,
+    });
+
+    const result = await controller.promise;
+    assert.ok(result, 'Must export video');
+
+    // Point 1 & 2: exactly 3 narration items requested in coaching order
+    assert.equal(calledItems.length, 3, 'Point 1: exactly 3 narration items requested');
+    assert.equal(calledItems[0].coachingMomentId, 'coach1', 'Point 2: first item is coach1 (Kiểm tra vai)');
+    assert.equal(calledItems[1].coachingMomentId, 'coach2', 'Point 2: second item is coach2 (Mở thân người)');
+    assert.equal(calledItems[2].coachingMomentId, 'coach3', 'Point 2: third item is coach3 (Chạm bước một)');
+
+    // Point 3 & 4: narration audio track passed to video export & recorder stream includes audio
+    assert.equal(result.hasAudio, true, 'Point 3: exportResult hasAudio is true');
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    assert.equal(recorderInstance.stream.getAudioTracks().length, 1, 'Point 4: recorder stream includes 1 audio track');
+
+    // Point 5: export timeline is unchanged
+    const expectedDuration = calculateExportDuration(anim);
+    assert.equal(result.duration, expectedDuration, 'Point 5: export duration matches calculation exactly');
+
+    // Point 6: coaching freezes remain unchanged
+    const m1Mapping = mapPresentationTimeToTimeline(calledItems[0].startPresentationTime, anim, repDiagram);
+    assert.equal(m1Mapping.isFrozen, true, 'Point 6: drill is frozen during coaching moment hold phase');
+
+    // Point 7: partial provider failure still exports remaining audio
+    const partialProvider: NarrationAudioProvider = async (item) => {
+      if (item.coachingMomentId === 'coach2') return null;
+      return new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+    };
+    const partialController = exportDiagramToVideoBlob(repDiagram, { narrationProvider: partialProvider });
+    const partialResult = await partialController.promise;
+    assert.ok(partialResult);
+    assert.equal(partialResult.hasAudio, true, 'Point 7: partial provider failure still produces audio track');
+
+    // Point 8: total TTS failure exports silent WebM
+    let warnCaptured = '';
+    const failController = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: async () => null,
+      onNarrationWarning: (w) => { warnCaptured = w; },
+    });
+    const failResult = await failController.promise;
+    assert.ok(failResult);
+    assert.equal(failResult.hasAudio, false, 'Point 8: total TTS failure exports silent WebM');
+    assert.ok(warnCaptured.includes('Video sẽ được xuất không có âm thanh'), 'Point 8: warning emitted');
+
+    // Point 9: cancel cleans both audio and video resources
+    let cancelCtrlRef: any = null;
+    const cancelController = exportDiagramToVideoBlob(repDiagram, {
+      narrationProvider: provider,
+      onProgress: (p) => {
+        if (p.stage === 'rendering') cancelCtrlRef.cancel();
+      },
+    });
+    cancelCtrlRef = cancelController;
+    const cancelResult = await cancelController.promise;
+    assert.equal(cancelResult, null, 'Point 9: cancel resolves to null');
+
+    // Point 10: full-mode diagrams still export normally
+    const fullDiag = buildDefaultStructuredDiagram({
+      blockType: 'warm_up',
+      playerCount: 16,
+      playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+      organization: '16 cầu thủ chia thành 8 nhóm 2',
+      topic: 'Nhận bóng mở thân người',
+      representationMode: 'full',
+    });
+    const fullController = exportDiagramToVideoBlob(fullDiag, { narrationProvider: provider });
+    const fullResult = await fullController.promise;
+    assert.ok(fullResult, 'Point 10: full-mode diagram exports successfully');
+    assert.equal(fullResult.hasAudio, true, 'Point 10: full-mode diagram includes audio');
+  } finally {
+    restoreEnv();
+  }
 });
 

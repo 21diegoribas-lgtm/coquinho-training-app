@@ -31,6 +31,13 @@ import {
   RepresentationDisplayLabel,
   resolvePathCoordinates,
 } from './structuredDiagram';
+import {
+  buildCoachingNarrationTimeline,
+  createBrowserNarrationAudioProvider,
+  NarrationAudioController,
+  NarrationAudioProvider,
+  prepareNarrationAudioTrack,
+} from './coachingNarration';
 
 /**
  * Sensible default video bitrate for 1200x720 @ 30fps (TASK D8B2: 4–6 Mbps).
@@ -66,6 +73,12 @@ export interface VideoExportOptions {
   topic?: string;
   exerciseName?: string;
   onProgress?: (progress: VideoExportProgress) => void;
+  // TASK TTS-A3b: Coaching Narration Audio Options
+  includeNarration?: boolean;
+  narrationProvider?: NarrationAudioProvider;
+  onNarrationWarning?: (warning: string) => void;
+  onNarrationStatus?: (status: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface VideoExportProgress {
@@ -74,7 +87,9 @@ export interface VideoExportProgress {
   percent: number; // 0 to 100
   frame: number;
   totalFrames: number;
-  stage: 'rendering' | 'encoding' | 'completed' | 'cancelled' | 'error';
+  stage: 'preparing_audio' | 'rendering' | 'encoding' | 'completed' | 'cancelled' | 'error';
+  statusText?: string;
+  warning?: string;
 }
 
 export interface VideoExportResult {
@@ -955,6 +970,20 @@ export function exportDiagramToVideoBlob(
   let recorder: any = null;
   let finalStream: MediaStream | null = null;
   let triggerCancelCallback: (() => void) | null = null;
+  const abortController = new AbortController();
+
+  if (options.signal) {
+    if (options.signal.aborted) {
+      isCancelled = true;
+      abortController.abort();
+    } else {
+      options.signal.addEventListener('abort', () => {
+        isCancelled = true;
+        abortController.abort();
+        if (triggerCancelCallback) triggerCancelCallback();
+      }, { once: true });
+    }
+  }
 
   const promise = new Promise<VideoExportResult | null>(async (resolve, reject) => {
     // 1. Pre-flight quality validation (TASK D8B2)
@@ -976,18 +1005,90 @@ export function exportDiagramToVideoBlob(
     const mimeType = validation.mimeType || 'video/webm';
     const videoBitsPerSecond = options.videoBitsPerSecond ?? DEFAULT_VIDEO_BITS_PER_SECOND;
 
+    let narrationController: NarrationAudioController | null = null;
+    let effectiveAudioTrack: MediaStreamTrack | null = options.audioTrack ?? null;
+
+    // 2. Prepare narration audio track if requested and not already provided (TASK TTS-A3b)
+    if (!effectiveAudioTrack && options.includeNarration !== false && !isCancelled) {
+      try {
+        const narrationItems = buildCoachingNarrationTimeline(animation);
+        if (narrationItems.length > 0) {
+          options.onNarrationStatus?.('Đang chuẩn bị giọng đọc...');
+          options.onProgress?.({
+            presentationTime: 0,
+            totalDuration,
+            percent: 0,
+            frame: 0,
+            totalFrames,
+            stage: 'preparing_audio',
+            statusText: 'Đang chuẩn bị giọng đọc...',
+          });
+
+          const provider = options.narrationProvider || createBrowserNarrationAudioProvider();
+          narrationController = await prepareNarrationAudioTrack({
+            items: narrationItems,
+            audioProvider: provider,
+            totalPresentationDuration: totalDuration,
+            signal: abortController.signal,
+          });
+
+          if (!isCancelled && narrationController && narrationController.audioTrack) {
+            effectiveAudioTrack = narrationController.audioTrack;
+          } else if (!isCancelled) {
+            // Silent fallback when all clips fail or provider unavailable (TASK TTS-A3b)
+            const warnMsg = 'Không thể tạo giọng đọc. Video sẽ được xuất không có âm thanh.';
+            options.onNarrationWarning?.(warnMsg);
+            options.onProgress?.({
+              presentationTime: 0,
+              totalDuration,
+              percent: 0,
+              frame: 0,
+              totalFrames,
+              stage: 'preparing_audio',
+              warning: warnMsg,
+            });
+          }
+        }
+      } catch (err: any) {
+        console.warn('[videoExport] Narration audio preparation failed, falling back to silent video:', err);
+        const warnMsg = 'Không thể tạo giọng đọc. Video sẽ được xuất không có âm thanh.';
+        options.onNarrationWarning?.(warnMsg);
+        options.onProgress?.({
+          presentationTime: 0,
+          totalDuration,
+          percent: 0,
+          frame: 0,
+          totalFrames,
+          stage: 'preparing_audio',
+          warning: warnMsg,
+        });
+        effectiveAudioTrack = null;
+      }
+    }
+
+    if (isCancelled) {
+      if (narrationController) {
+        try { narrationController.cancel(); } catch {}
+        try { narrationController.cleanup(); } catch {}
+      }
+      return resolve(null);
+    }
+
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
+      if (narrationController) {
+        try { narrationController.cleanup(); } catch {}
+      }
       return reject(new Error('Không thể khởi tạo Canvas 2D context'));
     }
 
-    // 2. Set up MediaStream with optional audio track (TASK D8B2)
+    // 3. Set up MediaStream with optional audio track (TASK D8B2 & TTS-A3b)
     try {
       const rawVideoStream = canvas.captureStream(fps);
-      finalStream = combineMediaStreamTracks(rawVideoStream, options.audioTrack);
+      finalStream = combineMediaStreamTracks(rawVideoStream, effectiveAudioTrack);
       const MR = (window as any).MediaRecorder;
 
       try {
@@ -1000,6 +1101,9 @@ export function exportDiagramToVideoBlob(
         recorder = new MR(finalStream, { mimeType });
       }
     } catch (err: any) {
+      if (narrationController) {
+        try { narrationController.cleanup(); } catch {}
+      }
       return reject(new Error(`Không thể khởi tạo MediaRecorder: ${err.message || String(err)}`));
     }
 
@@ -1031,6 +1135,16 @@ export function exportDiagramToVideoBlob(
 
     triggerCancelCallback = () => {
       isCancelled = true;
+      abortController.abort();
+      if (narrationController) {
+        try { narrationController.cancel(); } catch {}
+        try { narrationController.cleanup(); } catch {}
+        narrationController = null;
+      }
+      if (effectiveAudioTrack) {
+        try { effectiveAudioTrack.stop(); } catch {}
+        effectiveAudioTrack = null;
+      }
       safeStopMediaRecorder(recorder, finalStream);
       options.onProgress?.({
         presentationTime: 0,
@@ -1043,7 +1157,7 @@ export function exportDiagramToVideoBlob(
       resolve(null);
     };
 
-    // 3. Deterministic frame pacing loop (TASK D8B2: presentationTime derived from frame index)
+    // 4. Deterministic frame pacing loop (TASK D8B2: presentationTime derived from frame index)
     const frameIntervalMs = 1000 / fps;
     const img = new Image();
 
@@ -1091,7 +1205,7 @@ export function exportDiagramToVideoBlob(
         return;
       }
 
-      // 4. Final Frame Safety: Hold final frame slightly so recorder captures final frame (TASK D8B2)
+      // 5. Final Frame Safety: Hold final frame slightly so recorder captures final frame (TASK D8B2)
       await new Promise((r) => setTimeout(r, frameIntervalMs * 1.5));
 
       options.onProgress?.({
@@ -1103,8 +1217,18 @@ export function exportDiagramToVideoBlob(
         stage: 'encoding',
       });
 
-      // 5. Harden shutdown (TASK D8B2)
+      const hasAudio = Boolean(effectiveAudioTrack || options.audioTrack);
+
+      // 6. Harden shutdown and cleanup narration controller (TASK D8B2 & TTS-A3b)
       await safeStopMediaRecorder(recorder, finalStream);
+      if (narrationController) {
+        try { narrationController.cleanup(); } catch {}
+        narrationController = null;
+      }
+      if (effectiveAudioTrack) {
+        try { effectiveAudioTrack.stop(); } catch {}
+        effectiveAudioTrack = null;
+      }
 
       const resultBlob = await recorderStoppedPromise;
       if (isCancelled || !resultBlob) {
@@ -1119,7 +1243,7 @@ export function exportDiagramToVideoBlob(
           stage: 'completed',
         });
 
-        // 6. Return rich export result metadata (TASK D8B2)
+        // 7. Return rich export result metadata (TASK D8B2 & TTS-A3b)
         const exportResult: VideoExportResult = {
           blob: resultBlob,
           mimeType: recorder.mimeType || mimeType,
@@ -1129,12 +1253,20 @@ export function exportDiagramToVideoBlob(
           width,
           height,
           frameCount: totalFrames + 1,
-          hasAudio: Boolean(options.audioTrack),
+          hasAudio,
         };
 
         resolve(exportResult);
       }
     } catch (err: any) {
+      if (narrationController) {
+        try { narrationController.cleanup(); } catch {}
+        narrationController = null;
+      }
+      if (effectiveAudioTrack) {
+        try { effectiveAudioTrack.stop(); } catch {}
+        effectiveAudioTrack = null;
+      }
       await safeStopMediaRecorder(recorder, finalStream);
       options.onProgress?.({
         presentationTime: 0,
@@ -1150,8 +1282,9 @@ export function exportDiagramToVideoBlob(
 
   return {
     cancel: () => {
+      isCancelled = true;
+      abortController.abort();
       if (triggerCancelCallback) triggerCancelCallback();
-      else isCancelled = true;
     },
     promise,
   };

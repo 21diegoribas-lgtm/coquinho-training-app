@@ -437,13 +437,89 @@ export async function prepareNarrationAudioTrack(
 
   let isCancelled = false;
   let isCleanedUp = false;
+  let context: AudioContext | null = null;
+  let ownsContext = false;
+  let destNode: MediaStreamAudioDestinationNode | null = null;
+  let gainNode: GainNode | null = null;
+  let stream: MediaStream | null = null;
+  let audioTrack: MediaStreamTrack | null = null;
+  const activeSources = new Set<AudioBufferSourceNode>();
+  let scheduledClipsCount = 0;
+
+  const internalAbortController = new AbortController();
+
+  const cancel = () => {
+    if (isCancelled) return;
+    isCancelled = true;
+    internalAbortController.abort();
+    if (signal) {
+      signal.removeEventListener('abort', onParentAbort);
+    }
+
+    // Stop all active sources
+    for (const source of Array.from(activeSources)) {
+      try {
+        source.stop(0);
+      } catch {}
+      try {
+        source.disconnect();
+      } catch {}
+    }
+    activeSources.clear();
+
+    // Disconnect gain node
+    if (gainNode) {
+      try {
+        gainNode.disconnect();
+      } catch {}
+    }
+
+    // Stop output tracks
+    if (audioTrack && typeof audioTrack.stop === 'function') {
+      try {
+        audioTrack.stop();
+      } catch {}
+    }
+    if (stream && typeof stream.getTracks === 'function') {
+      try {
+        stream.getTracks().forEach((track) => {
+          if (typeof track.stop === 'function') {
+            try { track.stop(); } catch {}
+          }
+        });
+      } catch {}
+    }
+  };
+
+  const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    cancel();
+
+    const shouldClose = options.closeContextOnCleanup !== undefined
+      ? options.closeContextOnCleanup
+      : ownsContext;
+
+    if (shouldClose && context && context.state !== 'closed' && typeof context.close === 'function') {
+      try {
+        context.close().catch(() => {});
+      } catch {}
+    }
+  };
+
+  const onParentAbort = () => {
+    cancel();
+  };
+  if (signal) {
+    signal.addEventListener('abort', onParentAbort, { once: true });
+  }
 
   const noOpController: NarrationAudioController = {
     audioTrack: null,
     stream: null,
     context: null,
-    cancel: () => {},
-    cleanup: () => {},
+    cancel,
+    cleanup,
     scheduledClipsCount: 0,
   };
 
@@ -455,14 +531,6 @@ export async function prepareNarrationAudioTrack(
   // 2. Browser capability check (unless caller provides an existing AudioContext)
   if (!externalContext && !isNarrationAudioSupported()) {
     return noOpController;
-  }
-
-  const internalAbortController = new AbortController();
-  const onParentAbort = () => {
-    cancel();
-  };
-  if (signal) {
-    signal.addEventListener('abort', onParentAbort, { once: true });
   }
 
   // 3. Sort items strictly chronologically
@@ -504,8 +572,6 @@ export async function prepareNarrationAudioTrack(
   }
 
   // 6. Obtain or instantiate AudioContext
-  let context: AudioContext;
-  let ownsContext = false;
   try {
     if (externalContext) {
       context = externalContext;
@@ -518,16 +584,18 @@ export async function prepareNarrationAudioTrack(
       ownsContext = true;
     }
 
-    if (context.state === 'suspended' && typeof context.resume === 'function') {
+    if (context && context.state === 'suspended' && typeof context.resume === 'function') {
       context.resume().catch(() => {});
     }
   } catch {
     return noOpController;
   }
 
+  if (!context) {
+    return noOpController;
+  }
+
   // 7. Create destination node and gain node for normalized volume
-  let destNode: MediaStreamAudioDestinationNode;
-  let gainNode: GainNode;
   try {
     destNode = context.createMediaStreamDestination();
     gainNode = context.createGain();
@@ -541,18 +609,15 @@ export async function prepareNarrationAudioTrack(
 
     gainNode.connect(destNode);
   } catch {
-    if (ownsContext && typeof context.close === 'function') {
+    if (ownsContext && context && typeof context.close === 'function') {
       context.close().catch(() => {});
     }
     return noOpController;
   }
 
-  const stream = destNode.stream || null;
+  stream = destNode.stream || null;
   const audioTracks = stream && typeof stream.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
-  const audioTrack = audioTracks.length > 0 ? audioTracks[0] : null;
-
-  const activeSources = new Set<AudioBufferSourceNode>();
-  let scheduledClipsCount = 0;
+  audioTrack = audioTracks.length > 0 ? audioTracks[0] : null;
 
   const baseTime = typeof presentationStartOffset === 'number'
     ? presentationStartOffset
@@ -600,65 +665,6 @@ export async function prepareNarrationAudioTrack(
       // Individual source failure should not abort remaining clips
     }
   }
-
-  // 9. Cancel logic
-  const cancel = () => {
-    if (isCancelled) return;
-    isCancelled = true;
-    internalAbortController.abort();
-    if (signal) {
-      signal.removeEventListener('abort', onParentAbort);
-    }
-
-    // Stop all active sources
-    for (const source of Array.from(activeSources)) {
-      try {
-        source.stop(0);
-      } catch {}
-      try {
-        source.disconnect();
-      } catch {}
-    }
-    activeSources.clear();
-
-    // Disconnect gain node
-    try {
-      gainNode.disconnect();
-    } catch {}
-
-    // Stop output tracks
-    if (audioTrack && typeof audioTrack.stop === 'function') {
-      try {
-        audioTrack.stop();
-      } catch {}
-    }
-    if (stream && typeof stream.getTracks === 'function') {
-      try {
-        stream.getTracks().forEach((track) => {
-          if (typeof track.stop === 'function') {
-            try { track.stop(); } catch {}
-          }
-        });
-      } catch {}
-    }
-  };
-
-  // 10. Cleanup logic
-  const shouldCloseContext = options.closeContextOnCleanup !== undefined
-    ? options.closeContextOnCleanup
-    : ownsContext;
-
-  const cleanup = () => {
-    if (isCleanedUp) return;
-    isCleanedUp = true;
-    cancel();
-
-    if (shouldCloseContext && context && context.state !== 'closed' && typeof context.close === 'function') {
-      try {
-        context.close().catch(() => {});
-      } catch {}
-    }
-  };
 
   return {
     audioTrack,

@@ -224,7 +224,9 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
 
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportPercent, setExportPercent] = useState<number>(0);
+  const [exportStatusText, setExportStatusText] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
   const exportControllerRef = useRef<{ cancel: () => void } | null>(null);
 
   // Dọn dẹp export controller khi unmount
@@ -240,6 +242,8 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
   const handleStartExport = () => {
     if (isExporting) return;
     setExportError(null);
+    setExportWarning(null);
+    setExportStatusText(null);
 
     const support = isBrowserVideoExportSupported();
     if (!support.supported) {
@@ -254,7 +258,17 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     const controller = exportAndDownloadDiagramVideo(diagram, {
       exerciseName: exerciseName || topic,
       topic,
+      onNarrationStatus: (status) => {
+        setExportStatusText(status);
+      },
+      onNarrationWarning: (warning) => {
+        setExportWarning(warning);
+        setTimeout(() => setExportWarning(null), 5000);
+      },
       onProgress: (p) => {
+        if (p.stage === 'rendering' || p.stage === 'encoding') {
+          setExportStatusText(null);
+        }
         setExportPercent(p.percent);
       },
     });
@@ -275,6 +289,7 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
       .finally(() => {
         setIsExporting(false);
         setExportPercent(0);
+        setExportStatusText(null);
         exportControllerRef.current = null;
       });
   };
@@ -286,6 +301,8 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     }
     setIsExporting(false);
     setExportPercent(0);
+    setExportStatusText(null);
+    setExportWarning(null);
   };
 
   const handleSeek = (newTime: number) => {
@@ -960,11 +977,11 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
             {/* Phân cách */}
             <div className="h-3 w-[1px] bg-white/20 ml-0.5" />
 
-            {/* Nút Xuất video & Tiến trình xuất (TASK D8B1) */}
+            {/* Nút Xuất video & Tiến trình xuất (TASK D8B1 & TTS-A3b) */}
             {isExporting ? (
               <div className="flex items-center gap-1.5 text-[11px] text-amber-300 font-mono pl-0.5">
                 <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                <span>Đang xuất {exportPercent}%</span>
+                <span>{exportStatusText || `Đang xuất ${exportPercent}%`}</span>
                 <button
                   type="button"
                   onClick={handleCancelExport}
@@ -985,6 +1002,13 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
                 <span className="hidden sm:inline">Xuất video</span>
                 <span className="sm:hidden">Video</span>
               </button>
+            )}
+
+            {/* Cảnh báo âm thanh giọng đọc nếu có (TASK TTS-A3b) */}
+            {exportWarning && (
+              <span className="text-[10px] text-amber-200 max-w-[180px] truncate" title={exportWarning}>
+                {exportWarning}
+              </span>
             )}
 
             {/* Thông báo lỗi xuất video nếu có */}
