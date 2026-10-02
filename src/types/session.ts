@@ -111,6 +111,7 @@ export interface PlayerMoveAction {
   type: 'playerMove';
   playerId: string;
   to: DiagramCoordinate;
+  curve?: { controlX: number; controlY: number } | 'mild' | 'arc';
 }
 
 export interface BallPassAction {

@@ -1678,13 +1678,319 @@ export function buildSemanticCoachingMoments(
 }
 
 /**
+ * Pure easing profiles for drill animation actions (TASK D8A).
+ */
+export function easePlayerMove(p: number): number {
+  const clamped = Math.max(0, Math.min(1, p));
+  // Smooth acceleration and deceleration (easeInOutCubic)
+  return clamped < 0.5
+    ? 4 * clamped * clamped * clamped
+    : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
+}
+
+export function easeBallPass(p: number): number {
+  const clamped = Math.max(0, Math.min(1, p));
+  // Fast flight through mid-flight, clean arrival at receiver (easeInOutQuad)
+  return clamped < 0.5
+    ? 2 * clamped * clamped
+    : 1 - Math.pow(-2 * clamped + 2, 2) / 2;
+}
+
+export function easeBallDribble(p: number): number {
+  const clamped = Math.max(0, Math.min(1, p));
+  if (clamped <= 0) return 0;
+  if (clamped >= 1) return 1;
+  // Soft sinusoidal easing (easeInOutSine) for natural, fluid close-control dribbling
+  return -(Math.cos(Math.PI * clamped) - 1) / 2;
+}
+
+export function getActionEasing(actionType: string, progress: number): number {
+  switch (actionType) {
+    case 'playerMove':
+      return easePlayerMove(progress);
+    case 'ballPass':
+      return easeBallPass(progress);
+    case 'ballDribble':
+      return easeBallDribble(progress);
+    default:
+      return Math.max(0, Math.min(1, progress));
+  }
+}
+
+/**
+ * Evaluates a quadratic Bézier curve bounded within pitch limits.
+ */
+export function interpolateQuadraticBezier(
+  p0: DiagramCoordinate,
+  p1: DiagramCoordinate,
+  p2: DiagramCoordinate,
+  t: number
+): DiagramCoordinate {
+  const u = Math.max(0, Math.min(1, t));
+  const inv = 1 - u;
+  const x = inv * inv * p0.x + 2 * inv * u * p1.x + u * u * p2.x;
+  const y = inv * inv * p0.y + 2 * inv * u * p1.y + u * u * p2.y;
+  return {
+    x: Math.max(0, Math.min(100, Math.round(x * 100) / 100)),
+    y: Math.max(0, Math.min(100, Math.round(y * 100) / 100)),
+  };
+}
+
+/**
+ * Pure helper for player movement interpolation with optional subtle curved routes.
+ */
+export function interpolatePlayerMovement(
+  from: DiagramCoordinate,
+  to: DiagramCoordinate,
+  progress: number,
+  curve?: { controlX: number; controlY: number } | 'mild' | 'arc'
+): DiagramCoordinate {
+  const u = Math.max(0, Math.min(1, progress));
+  if (u <= 0) return { x: from.x, y: from.y };
+  if (u >= 1) return { x: to.x, y: to.y };
+
+  if (curve) {
+    let control: DiagramCoordinate;
+    if (typeof curve === 'object' && typeof curve.controlX === 'number' && typeof curve.controlY === 'number') {
+      control = { x: curve.controlX, y: curve.controlY };
+    } else {
+      // Calculate a mild perpendicular control point (mild arc within bounds)
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const midX = (from.x + to.x) / 2;
+      const midY = (from.y + to.y) / 2;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const arcScale = curve === 'arc' ? 0.12 : 0.08;
+      const nx = dist > 0 ? (-dy / dist) * dist * arcScale : 0;
+      const ny = dist > 0 ? (dx / dist) * dist * arcScale : 0;
+      control = {
+        x: Math.max(2, Math.min(98, midX + nx)),
+        y: Math.max(2, Math.min(58, midY + ny)),
+      };
+    }
+    return interpolateQuadraticBezier(from, control, to, u);
+  }
+
+  // Fallback: straight-line interpolation
+  const x = from.x + (to.x - from.x) * u;
+  const y = from.y + (to.y - from.y) * u;
+  return {
+    x: Math.max(0, Math.min(100, Math.round(x * 100) / 100)),
+    y: Math.max(0, Math.min(100, Math.round(y * 100) / 100)),
+  };
+}
+
+/**
+ * Pure helper to compute ball pass flight coordinates with optional subtle readability arc.
+ * Reaches receiver's interpolated position cleanly at arrival.
+ */
+export function calculatePassBallPosition(
+  passerPos: DiagramCoordinate,
+  receiverPos: DiagramCoordinate,
+  progress: number,
+  arcHeight: number = 0
+): DiagramCoordinate {
+  const u = Math.max(0, Math.min(1, progress));
+  if (u <= 0) return { x: passerPos.x, y: passerPos.y };
+  if (u >= 1) return { x: receiverPos.x, y: receiverPos.y };
+
+  const baseX = passerPos.x + (receiverPos.x - passerPos.x) * u;
+  const baseY = passerPos.y + (receiverPos.y - passerPos.y) * u;
+
+  if (arcHeight !== 0) {
+    const dx = receiverPos.x - passerPos.x;
+    const dy = receiverPos.y - passerPos.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 1) {
+      const nx = -dy / dist;
+      const ny = dx / dist;
+      const arcLift = 4 * u * (1 - u) * arcHeight;
+      return {
+        x: Math.max(1, Math.min(99, Math.round((baseX + nx * arcLift) * 100) / 100)),
+        y: Math.max(1, Math.min(59, Math.round((baseY + ny * arcLift) * 100) / 100)),
+      };
+    }
+  }
+
+  return {
+    x: Math.max(0, Math.min(100, Math.round(baseX * 100) / 100)),
+    y: Math.max(0, Math.min(100, Math.round(baseY * 100) / 100)),
+  };
+}
+
+/**
+ * Pure helper to calculate ball position during a dribble action.
+ * Offsets ball slightly ahead of player in travel direction, settling close upon arrival.
+ */
+export function calculateDribbleBallPosition(
+  playerPos: DiagramCoordinate,
+  targetPos: DiagramCoordinate,
+  progress: number,
+  offsetDistance: number = 1.6,
+  startPos?: DiagramCoordinate
+): DiagramCoordinate {
+  const dx = targetPos.x - playerPos.x;
+  const dy = targetPos.y - playerPos.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  let ux = 1;
+  let uy = 0;
+
+  if (dist > 0.001) {
+    ux = dx / dist;
+    uy = dy / dist;
+  } else if (startPos) {
+    const sDx = targetPos.x - startPos.x;
+    const sDy = targetPos.y - startPos.y;
+    const sDist = Math.sqrt(sDx * sDx + sDy * sDy);
+    if (sDist > 0.001) {
+      ux = sDx / sDist;
+      uy = sDy / sDist;
+    }
+  }
+
+  // During active dribbling, keep subtle offset in travel direction (~1.6 units).
+  // Approaching destination (progress > 0.75) and upon arrival (progress >= 1), ball settles close to player (~0.8 units).
+  const effectiveOffset =
+    progress >= 1
+      ? offsetDistance * 0.5
+      : progress > 0.75
+      ? offsetDistance * (1 - 0.5 * ((progress - 0.75) / 0.25))
+      : offsetDistance;
+
+  return {
+    x: Math.max(1, Math.min(99, Math.round((playerPos.x + ux * effectiveOffset) * 100) / 100)),
+    y: Math.max(1, Math.min(59, Math.round((playerPos.y + uy * effectiveOffset) * 100) / 100)),
+  };
+}
+
+/**
+ * Pure helper to avoid visual player marker stacking without altering tactical structure.
+ */
+export function applyPlayerSpacingSafety(
+  positions: Map<string, DiagramCoordinate>,
+  minSeparation: number = 2.8,
+  pitchBounds: { minX: number; maxX: number; minY: number; maxY: number } = { minX: 2, maxX: 98, minY: 2, maxY: 58 }
+): Map<string, DiagramCoordinate> {
+  const resolved = new Map(positions);
+  const playerIds = Array.from(resolved.keys());
+
+  for (let i = 0; i < playerIds.length; i++) {
+    for (let j = i + 1; j < playerIds.length; j++) {
+      const idA = playerIds[i];
+      const idB = playerIds[j];
+      const posA = resolved.get(idA);
+      const posB = resolved.get(idB);
+      if (!posA || !posB) continue;
+
+      const dx = posB.x - posA.x;
+      const dy = posB.y - posA.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < minSeparation) {
+        const angle = dist > 0.001 ? Math.atan2(dy, dx) : ((i + 1) * Math.PI) / 4;
+        const nudge = (minSeparation - dist) / 2;
+        const nx = Math.cos(angle) * nudge;
+        const ny = Math.sin(angle) * nudge;
+
+        resolved.set(idA, {
+          x: Math.max(pitchBounds.minX, Math.min(pitchBounds.maxX, Math.round((posA.x - nx) * 100) / 100)),
+          y: Math.max(pitchBounds.minY, Math.min(pitchBounds.maxY, Math.round((posA.y - ny) * 100) / 100)),
+        });
+        resolved.set(idB, {
+          x: Math.max(pitchBounds.minX, Math.min(pitchBounds.maxX, Math.round((posB.x + nx) * 100) / 100)),
+          y: Math.max(pitchBounds.minY, Math.min(pitchBounds.maxY, Math.round((posB.y + ny) * 100) / 100)),
+        });
+      }
+    }
+  }
+
+  return resolved;
+}
+
+/**
+ * Pure helper to compute distance-paced duration for animation actions (TASK D8A).
+ * Avoids very short moves taking too long or very long moves completing instantly.
+ */
+export function calculatePacedDuration(
+  distance: number,
+  actionType: 'playerMove' | 'ballPass' | 'ballDribble',
+  defaultDuration: number = 2.0
+): number {
+  const d = Math.max(0, distance);
+  if (d <= 0.001) return defaultDuration;
+
+  let speed: number;
+  switch (actionType) {
+    case 'ballPass':
+      // Passes travel swiftly (~22 pitch units/sec)
+      speed = 22;
+      break;
+    case 'ballDribble':
+      // Controlled close ball carry (~10 pitch units/sec)
+      speed = 10;
+      break;
+    case 'playerMove':
+    default:
+      // Player off-the-ball run (~13 pitch units/sec)
+      speed = 13;
+      break;
+  }
+
+  const rawPaced = d / speed;
+  // Blend with defaultDuration for smooth pacing, clamped strictly between 0.8s and 3.5s
+  const blended = 0.5 * defaultDuration + 0.5 * rawPaced;
+  return Math.max(0.8, Math.min(3.5, Math.round(blended * 100) / 100));
+}
+
+/**
+ * Pure helper for normalizing step durations to avoid unrealistic speeds.
+ */
+export function normalizeStepDurations(
+  steps: DiagramAnimationStep[],
+  totalDuration?: number
+): DiagramAnimationStep[] {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return steps || [];
+  }
+
+  let currentStart = 0;
+  return steps.map((step, idx) => {
+    const rawDuration = step.duration > 0 ? step.duration : 2.0;
+    const clampedDuration = Math.max(0.8, Math.min(4.0, rawDuration));
+    const start = idx === 0 ? step.start : Math.max(step.start, currentStart);
+    currentStart = start + clampedDuration;
+    return {
+      ...step,
+      start: Math.round(start * 100) / 100,
+      duration: Math.round(clampedDuration * 100) / 100,
+    };
+  });
+}
+
+export interface MotionInterpolationOptions {
+  visualDribbleOffset?: boolean;
+  passArc?: boolean;
+  curvedMovement?: boolean;
+  spacingSafety?: boolean;
+}
+
+export const DEFAULT_POLISHED_MOTION_OPTIONS: MotionInterpolationOptions = {
+  curvedMovement: true,
+  passArc: true,
+  visualDribbleOffset: true,
+  spacingSafety: true,
+};
+
+/**
  * Interpolates player and ball positions at any time t (in seconds) during playback.
  * At currentTime <= 0 or when stopped/reset: returns exact initial positions from diagram.players & diagram.balls.
  * Only action types playerMove, ballPass, and ballDribble are evaluated.
  */
 export function interpolateAnimationState(
   diagram: StructuredDrillDiagram,
-  currentTime: number
+  currentTime: number,
+  options?: MotionInterpolationOptions
 ): {
   players: DiagramPlayer[];
   balls: DiagramBall[];
@@ -1704,12 +2010,12 @@ export function interpolateAnimationState(
   const t = Math.max(0, Math.min(duration, currentTime));
 
   // Current dynamic positions of players and balls
-  const playerPositions = new Map<string, { x: number; y: number }>();
+  const playerPositions = new Map<string, DiagramCoordinate>();
   basePlayers.forEach((p) => {
     playerPositions.set(p.id, { x: p.x, y: p.y });
   });
 
-  const ballPositions = new Map<string, { x: number; y: number }>();
+  const ballPositions = new Map<string, DiagramCoordinate>();
   baseBalls.forEach((b) => {
     ballPositions.set(b.id, { x: b.x, y: b.y });
   });
@@ -1727,43 +2033,68 @@ export function interpolateAnimationState(
     }
 
     const isFinished = t >= stepEnd;
-    const progress = isFinished ? 1 : Math.max(0, Math.min(1, (t - stepStart) / stepDuration));
+    const rawProgress = isFinished ? 1 : Math.max(0, Math.min(1, (t - stepStart) / stepDuration));
 
     const snapshotPlayers = new Map(playerPositions);
     const snapshotBalls = new Map(ballPositions);
 
     if (Array.isArray(step.actions)) {
+      // First update any player movements in the step so passes synchronize with moving receivers
       for (const action of step.actions) {
         if (action.type === 'playerMove') {
           const startPos = snapshotPlayers.get(action.playerId);
           if (startPos && action.to) {
-            const currX = startPos.x + (action.to.x - startPos.x) * progress;
-            const currY = startPos.y + (action.to.y - startPos.y) * progress;
-            playerPositions.set(action.playerId, { x: currX, y: currY });
+            const eased = isFinished ? 1 : easePlayerMove(rawProgress);
+            const curve = action.curve ?? (options?.curvedMovement ? 'mild' : undefined);
+            const newPos = interpolatePlayerMovement(startPos, action.to, eased, curve);
+            playerPositions.set(action.playerId, newPos);
           }
-        } else if (action.type === 'ballPass') {
+        }
+      }
+
+      for (const action of step.actions) {
+        if (action.type === 'ballPass') {
           const fromPos = snapshotPlayers.get(action.fromPlayerId);
-          const toPos = snapshotPlayers.get(action.toPlayerId);
+          // If receiver is moving during the pass: target receiver's destination trajectory
+          // so ball arrives exactly at receiver position cleanly synchronized
+          const receiverMove = step.actions.find(
+            (a): a is PlayerMoveAction => a.type === 'playerMove' && a.playerId === action.toPlayerId
+          );
+          const toPos = receiverMove
+            ? receiverMove.to
+            : (playerPositions.get(action.toPlayerId) || snapshotPlayers.get(action.toPlayerId));
+
           if (fromPos && toPos) {
-            const currX = fromPos.x + (toPos.x - fromPos.x) * progress;
-            const currY = fromPos.y + (toPos.y - fromPos.y) * progress;
-            ballPositions.set(action.ballId, { x: currX, y: currY });
+            const eased = isFinished ? 1 : easeBallPass(rawProgress);
+            const arcHeight = options?.passArc ? 1.5 : 0;
+            const ballPos = calculatePassBallPosition(fromPos, toPos, eased, arcHeight);
+            ballPositions.set(action.ballId, ballPos);
           }
         } else if (action.type === 'ballDribble') {
           const startPos = snapshotPlayers.get(action.playerId);
           if (startPos && action.to) {
-            const currX = startPos.x + (action.to.x - startPos.x) * progress;
-            const currY = startPos.y + (action.to.y - startPos.y) * progress;
-            playerPositions.set(action.playerId, { x: currX, y: currY });
-            ballPositions.set(action.ballId, { x: currX, y: currY });
+            const eased = isFinished ? 1 : easeBallDribble(rawProgress);
+            const newPlayerPos = interpolatePlayerMovement(startPos, action.to, eased);
+            playerPositions.set(action.playerId, newPlayerPos);
+
+            if (options?.visualDribbleOffset) {
+              const ballPos = calculateDribbleBallPosition(newPlayerPos, action.to, eased, 1.6, startPos);
+              ballPositions.set(action.ballId, ballPos);
+            } else {
+              ballPositions.set(action.ballId, { x: newPlayerPos.x, y: newPlayerPos.y });
+            }
           }
         }
       }
     }
   }
 
+  const finalPlayerPositions = options?.spacingSafety
+    ? applyPlayerSpacingSafety(playerPositions)
+    : playerPositions;
+
   const updatedPlayers = basePlayers.map((p) => {
-    const pos = playerPositions.get(p.id);
+    const pos = finalPlayerPositions.get(p.id);
     const orientation = reconstructPlayerOrientation(
       p.id,
       currentTime,

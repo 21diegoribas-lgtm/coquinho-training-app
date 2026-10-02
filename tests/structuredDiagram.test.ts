@@ -1,20 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applyPlayerSpacingSafety,
   buildCoachingSequence,
   buildDefaultStructuredDiagram,
   buildSemanticAnimation,
   buildSemanticCoachingMoments,
   buildWavyPath,
   calculateCameraViewBox,
+  calculateDribbleBallPosition,
   calculateMomentPriority,
   calculateOrientationFromNextAction,
+  calculatePacedDuration,
+  calculatePassBallPosition,
   classifySemanticEvents,
   clusterDiagramPlayers,
+  DEFAULT_POLISHED_MOTION_OPTIONS,
   detectEquipmentGoals,
+  easeBallDribble,
+  easeBallPass,
   easeInOutCubic,
+  easePlayerMove,
   filterValidCoachingMoments,
   formatCoachingOverlayText,
+  getActionEasing,
   getCoachingPhaseState,
   getCoachingSequencePosition,
   getCoachingSequenceProgress,
@@ -22,9 +31,12 @@ import {
   getSequenceTimelineMarkers,
   getTeamStyle,
   interpolateAnimationState,
+  interpolatePlayerMovement,
+  interpolateQuadraticBezier,
   interpolateViewBox,
   isOpposedExercise,
   normalizeOrientation,
+  normalizeStepDurations,
   prioritizeCoachingMoments,
   reconstructPlayerOrientation,
   resolveCoachingMomentOverlaps,
@@ -42,6 +54,7 @@ import { buildLocalFallbackPlan } from '../src/services/trainingPlanService';
 import { sanitizeGeminiPlan } from '../src/services/planValidation';
 import {
   DiagramAnimation,
+  DiagramAnimationStep,
   DiagramCoachingMoment,
   DiagramCoachingSequence,
   DiagramPlayer,
@@ -2345,6 +2358,439 @@ test('D7C: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 
   assert.deepEqual(resetMarkers.map((m) => m.state), ['future', 'future', 'future']);
   const resetReceiverOrient = reconstructPlayerOrientation(receiverId, 0, 0, moments);
   assert.equal(resetReceiverOrient, 0);
+});
+
+// ============================================================================
+// TASK D8A: MOTION QUALITY POLISH FOR STRUCTURED DRILL ANIMATION
+// ============================================================================
+
+test('D8A: action-specific easing profiles (playerMove, ballPass, ballDribble, getActionEasing)', () => {
+  // 1. Boundary conditions: all easing profiles must map 0 -> 0, 0.5 -> 0.5 (symmetric), 1 -> 1
+  for (const fn of [easePlayerMove, easeBallPass, easeBallDribble]) {
+    assert.equal(fn(0), 0);
+    assert.equal(Math.round(fn(0.5) * 100) / 100, 0.5);
+    assert.equal(fn(1), 1);
+    assert.equal(fn(-0.5), 0); // clamped lower
+    assert.equal(fn(1.5), 1); // clamped upper
+  }
+
+  // 2. playerMove: smooth acceleration and deceleration (easeInOutCubic)
+  // At 20% progress: slow start (cubic < linear)
+  const pMove20 = easePlayerMove(0.2);
+  assert.ok(pMove20 < 0.2, `easePlayerMove(0.2) should be < 0.2, got ${pMove20}`);
+  // At 80% progress: smooth deceleration (cubic > linear)
+  const pMove80 = easePlayerMove(0.8);
+  assert.ok(pMove80 > 0.8, `easePlayerMove(0.8) should be > 0.8, got ${pMove80}`);
+
+  // 3. ballPass: faster through mid-flight, clean arrival at receiver (easeInOutQuad)
+  const pass20 = easeBallPass(0.2);
+  const pass30 = easeBallPass(0.3);
+  const pass70 = easeBallPass(0.7);
+  // Quadratic easing transitions with velocity through mid-flight
+  assert.ok(pass30 - pass20 > 0.08, 'ballPass accelerates cleanly in mid-flight');
+  assert.ok(pass70 > 0.7, 'ballPass approaches receiver smoothly');
+
+  // 4. ballDribble: soft sinusoidal easing (easeInOutSine) for natural close control
+  const dribble20 = easeBallDribble(0.2);
+  // Sine easing has gentler initial acceleration than cubic
+  assert.ok(dribble20 > pMove20, `dribble easing (${dribble20}) is softer than cubic move (${pMove20})`);
+
+  // 5. getActionEasing dispatches correctly to respective profiles
+  assert.equal(getActionEasing('playerMove', 0.2), easePlayerMove(0.2));
+  assert.equal(getActionEasing('ballPass', 0.2), easeBallPass(0.2));
+  assert.equal(getActionEasing('ballDribble', 0.2), easeBallDribble(0.2));
+  assert.equal(getActionEasing('unknown', 0.3), 0.3);
+});
+
+test('D8A: curved player movement with pitch boundary safety', () => {
+  const from = { x: 20, y: 30 };
+  const to = { x: 70, y: 30 };
+
+  // 1. Straight-line interpolation when curve is undefined
+  const midStraight = interpolatePlayerMovement(from, to, 0.5);
+  assert.equal(midStraight.x, 45);
+  assert.equal(midStraight.y, 30);
+
+  // 2. Mild curved route bends away from the direct axis but reaches start and destination cleanly
+  const startCurved = interpolatePlayerMovement(from, to, 0, 'mild');
+  assert.equal(startCurved.x, 20);
+  assert.equal(startCurved.y, 30);
+
+  const endCurved = interpolatePlayerMovement(from, to, 1, 'mild');
+  assert.equal(endCurved.x, 70);
+  assert.equal(endCurved.y, 30);
+
+  const midCurved = interpolatePlayerMovement(from, to, 0.5, 'mild');
+  assert.equal(midCurved.x, 45);
+  // Mild arc has a perpendicular deviation
+  assert.notEqual(midCurved.y, 30);
+  assert.ok(midCurved.y >= 2 && midCurved.y <= 58, 'Curved position stays within pitch boundaries');
+
+  // 3. Explicit control point Bézier curve
+  const explicitCurved = interpolatePlayerMovement(from, to, 0.5, { controlX: 45, controlY: 15 });
+  assert.equal(explicitCurved.x, 45);
+  assert.equal(explicitCurved.y, 22.5);
+
+  // 4. pitch boundaries are strictly clamped in interpolateQuadraticBezier
+  const outOfBoundsCurve = interpolateQuadraticBezier({ x: 0, y: 0 }, { x: 50, y: -20 }, { x: 100, y: 0 }, 0.5);
+  assert.ok(outOfBoundsCurve.y >= 0, `y must be clamped to >= 0, got ${outOfBoundsCurve.y}`);
+});
+
+test('D8A: pass trajectory quality and dynamic moving receiver synchronization', () => {
+  const passer = { x: 20, y: 30 };
+  const stationaryReceiver = { x: 60, y: 30 };
+
+  // 1. Stationary pass with passArc = false
+  const passStart = calculatePassBallPosition(passer, stationaryReceiver, 0, 0);
+  assert.equal(passStart.x, 20);
+  assert.equal(passStart.y, 30);
+
+  const passMid = calculatePassBallPosition(passer, stationaryReceiver, 0.5, 0);
+  assert.equal(passMid.x, 40);
+  assert.equal(passMid.y, 30);
+
+  const passEnd = calculatePassBallPosition(passer, stationaryReceiver, 1.0, 0);
+  assert.equal(passEnd.x, 60);
+  assert.equal(passEnd.y, 30);
+
+  // 2. Readability arc provides subtle mid-flight lift and 0 lift at ends
+  const arcMid = calculatePassBallPosition(passer, stationaryReceiver, 0.5, 1.5);
+  assert.equal(arcMid.x, 40);
+  assert.notEqual(arcMid.y, 30);
+  const arcEnd = calculatePassBallPosition(passer, stationaryReceiver, 1.0, 1.5);
+  assert.equal(arcEnd.x, 60);
+  assert.equal(arcEnd.y, 30);
+
+  // 3. Dynamic Moving Receiver Synchronization:
+  // p1 passes to p2 while p2 is running forward from (50, 30) to (70, 30)
+  const dynamicDiagram: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 30 },
+      { id: 'p2', team: 'blue', x: 50, y: 30 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 30 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [],
+    animation: {
+      duration: 3,
+      steps: [
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.0,
+          actions: [
+            { type: 'playerMove', playerId: 'p2', to: { x: 70, y: 30 } },
+            { type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' },
+          ],
+        },
+      ],
+    },
+  };
+
+  // At start (t = 0): ball is at passer (20, 30)
+  const state0 = interpolateAnimationState(dynamicDiagram, 0, { passArc: false });
+  assert.equal(state0.balls[0].x, 20);
+  assert.equal(state0.balls[0].y, 30);
+
+  // At finish (t = 2.0): receiver has reached destination (70, 30)
+  // Ball arrives EXACTLY at receiver's destination (70, 30), synchronized with receiver
+  const stateEnd = interpolateAnimationState(dynamicDiagram, 2.0, { passArc: false });
+  assert.equal(stateEnd.players[1].x, 70);
+  assert.equal(stateEnd.players[1].y, 30);
+  assert.equal(stateEnd.balls[0].x, 70);
+  assert.equal(stateEnd.balls[0].y, 30);
+});
+
+test('D8A: dribble ball offset in travel direction and destination settling', () => {
+  const playerStart = { x: 40, y: 30 };
+  const playerTarget = { x: 60, y: 30 };
+
+  // 1. During active dribble (progress = 0.5):
+  // Player is at (50, 30). Ball should have a subtle offset ahead in travel direction (ux = 1, uy = 0)
+  const playerMid = { x: 50, y: 30 };
+  const ballMid = calculateDribbleBallPosition(playerMid, playerTarget, 0.5, 1.6, playerStart);
+  assert.ok(ballMid.x > playerMid.x, 'Ball is in front of player in direction of travel');
+  assert.equal(ballMid.y, playerMid.y);
+  const midOffset = ballMid.x - playerMid.x;
+  assert.ok(midOffset >= 1.5 && midOffset <= 1.7, `Offset during run is ~1.6, got ${midOffset}`);
+
+  // 2. At destination (progress >= 1):
+  // Ball settles closer to the player (~0.8 units) while preserving heading
+  const ballSettled = calculateDribbleBallPosition(playerTarget, playerTarget, 1.0, 1.6, playerStart);
+  const settledOffset = ballSettled.x - playerTarget.x;
+  assert.ok(settledOffset >= 0.7 && settledOffset <= 0.9, `Settled offset is ~0.8, got ${settledOffset}`);
+  assert.ok(settledOffset < midOffset, 'Ball settles closer to player upon arrival than during run');
+});
+
+test('D8A: player spacing safety avoids visual marker stacking without altering tactical structure', () => {
+  const positions = new Map<string, { x: number; y: number }>();
+  // Two players nearly stacked at (50, 30) with distance 0.4 < minSeparation (2.8)
+  positions.set('p1', { x: 50, y: 30 });
+  positions.set('p2', { x: 50.4, y: 30 });
+  // Third player well separated at (80, 45)
+  positions.set('p3', { x: 80, y: 45 });
+
+  const resolved = applyPlayerSpacingSafety(positions, 2.8);
+  const p1 = resolved.get('p1')!;
+  const p2 = resolved.get('p2')!;
+  const p3 = resolved.get('p3')!;
+
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  // Separation is restored to at least 2.8 units
+  assert.ok(dist >= 2.78, `Spacing safety ensures separation >= 2.8, got ${dist}`);
+  // Position adjustments are tiny and do not distort tactical geometry
+  assert.ok(Math.abs(p1.x - 50) <= 1.5);
+  // Unaffected player remains unchanged
+  assert.equal(p3.x, 80);
+  assert.equal(p3.y, 45);
+});
+
+test('D8A: sequential state quality across multi-action drill cycle', () => {
+  // Sequence:
+  // Step 1 [0s -> 2s]: p1 passes b1 to p2
+  // Step 2 [2s -> 4s]: p2 dribbles b1 to (80, 40)
+  // Step 3 [4s -> 6s]: p1 moves into support position at (65, 25)
+  const diagram: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 30 },
+      { id: 'p2', team: 'blue', x: 60, y: 30 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 30 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [],
+    animation: {
+      duration: 6,
+      steps: [
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.0,
+          actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+        },
+        {
+          id: 'step2',
+          start: 2.0,
+          duration: 2.0,
+          actions: [{ type: 'ballDribble', ballId: 'b1', playerId: 'p2', to: { x: 80, y: 40 } }],
+        },
+        {
+          id: 'step3',
+          start: 4.0,
+          duration: 2.0,
+          actions: [{ type: 'playerMove', playerId: 'p1', to: { x: 65, y: 25 } }],
+        },
+      ],
+    },
+  };
+
+  // 1. End of step 1 / start of step 2 (t = 2.0):
+  // b1 has arrived at p2 (60, 30)
+  const stateT2 = interpolateAnimationState(diagram, 2.0);
+  assert.equal(stateT2.balls[0].x, 60);
+  assert.equal(stateT2.balls[0].y, 30);
+  assert.equal(stateT2.players[0].x, 20); // p1 hasn't moved yet
+
+  // 2. Midpoint of step 2 (t = 3.0):
+  // p2 is dribbling b1 towards (80, 40); p1 remains at (20, 30) with no teleport
+  const stateT3 = interpolateAnimationState(diagram, 3.0);
+  assert.equal(stateT3.players[0].x, 20);
+  assert.equal(stateT3.players[1].x, 70);
+  assert.equal(stateT3.balls[0].x, 70);
+
+  // 3. End of step 2 / start of step 3 (t = 4.0):
+  // p2 and ball are at (80, 40)
+  const stateT4 = interpolateAnimationState(diagram, 4.0);
+  assert.equal(stateT4.players[1].x, 80);
+  assert.equal(stateT4.players[1].y, 40);
+  assert.equal(stateT4.balls[0].x, 80);
+  assert.equal(stateT4.balls[0].y, 40);
+
+  // 4. End of step 3 (t = 6.0):
+  // p1 moved to support (65, 25); p2 and ball STAY at (80, 40) without snapping back
+  const stateT6 = interpolateAnimationState(diagram, 6.0);
+  assert.equal(stateT6.players[0].x, 65);
+  assert.equal(stateT6.players[0].y, 25);
+  assert.equal(stateT6.players[1].x, 80);
+  assert.equal(stateT6.balls[0].x, 80);
+  assert.equal(stateT6.balls.length, 1, 'Never creates duplicate ball states');
+});
+
+test('D8A: coaching freeze compatibility preserves exact interpolated motion and orientation', () => {
+  const diagram: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 30, orientation: 0 },
+      { id: 'p2', team: 'blue', x: 60, y: 30, orientation: 180 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 30 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [],
+    animation: {
+      duration: 6,
+      coachingMoments: [
+        {
+          id: 'cm1',
+          time: 1.0,
+          duration: 3.0,
+          playerId: 'p2',
+          title: 'Kiểm tra vai',
+          text: 'Kiểm tra vai quan sát trước khi bóng đến',
+          orientation: 135,
+        },
+      ],
+      steps: [
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.0,
+          actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+        },
+      ],
+    },
+  };
+
+  // When coaching moment freezes at t = 1.0:
+  // 1. Ball freezes mid-flight at exact interpolated position (40, 30)
+  const frozenState = interpolateAnimationState(diagram, 1.0);
+  assert.equal(frozenState.balls[0].x, 40);
+  assert.equal(frozenState.balls[0].y, 30);
+
+  // 2. orientation is updated according to coaching moment target
+  assert.equal(frozenState.players[1].orientation, 135);
+
+  // 3. Calling interpolateAnimationState again with same time reproduces exact state (freeze stability)
+  const frozenStateRepeat = interpolateAnimationState(diagram, 1.0);
+  assert.deepEqual(frozenState, frozenStateRepeat);
+
+  // 4. Resuming to 1.5 continues smoothly mid-flight without restarting
+  const resumedState = interpolateAnimationState(diagram, 1.5);
+  assert.ok(resumedState.balls[0].x > 40 && resumedState.balls[0].x < 60);
+});
+
+test('D8A: scrub determinism at arbitrary animation time T', () => {
+  const diagram: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 30 },
+      { id: 'p2', team: 'blue', x: 60, y: 30 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 30 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [],
+    animation: {
+      duration: 5,
+      steps: [
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.5,
+          actions: [
+            { type: 'playerMove', playerId: 'p1', to: { x: 35, y: 45 } },
+            { type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' },
+          ],
+        },
+      ],
+    },
+  };
+
+  const arbitraryT = 1.73;
+  const sample1 = interpolateAnimationState(diagram, arbitraryT, DEFAULT_POLISHED_MOTION_OPTIONS);
+
+  // Simulate scrubbing forward, backward, and back to arbitraryT
+  interpolateAnimationState(diagram, 0.2, DEFAULT_POLISHED_MOTION_OPTIONS);
+  interpolateAnimationState(diagram, 3.5, DEFAULT_POLISHED_MOTION_OPTIONS);
+  interpolateAnimationState(diagram, 0.0, DEFAULT_POLISHED_MOTION_OPTIONS);
+
+  const sample2 = interpolateAnimationState(diagram, arbitraryT, DEFAULT_POLISHED_MOTION_OPTIONS);
+  assert.deepEqual(sample1, sample2, 'Scrubbing must be 100% deterministic and free of state drift');
+});
+
+test('D8A: motion duration quality and distance pacing', () => {
+  // 1. calculatePacedDuration: short distance doesn't drag on forever
+  const shortPass = calculatePacedDuration(5, 'ballPass', 2.0);
+  assert.ok(shortPass < 2.0, `Short pass should pace faster than default 2.0s, got ${shortPass}`);
+  assert.ok(shortPass >= 0.8, 'Pass duration clamped above 0.8s');
+
+  // 2. calculatePacedDuration: very long movement doesn't complete instantly
+  const longRun = calculatePacedDuration(50, 'playerMove', 2.0);
+  assert.ok(longRun > 2.0, `Long run should pace longer than default 2.0s, got ${longRun}`);
+  assert.ok(longRun <= 3.5, 'Run duration clamped below 3.5s');
+
+  // 3. normalizeStepDurations clamps unreasonable durations and maintains non-overlapping start times
+  const rawSteps: DiagramAnimationStep[] = [
+    { id: 's1', start: 0, duration: 0.2, actions: [] },
+    { id: 's2', start: 0.2, duration: 8.0, actions: [] },
+  ];
+  const normalized = normalizeStepDurations(rawSteps);
+  assert.equal(normalized[0].duration, 0.8, '0.2s duration clamped to min 0.8s');
+  assert.equal(normalized[1].duration, 4.0, '8.0s duration clamped to max 4.0s');
+  assert.ok(normalized[1].start >= normalized[0].start + normalized[0].duration, 'Steps do not overlap');
+});
+
+test('D8A: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 technical drill full motion quality verification', () => {
+  const diag = buildDefaultStructuredDiagram({
+    gameFormat: '7v7',
+    playerCount: 16,
+    blockType: 'technical',
+    topic: 'Nhận bóng mở thân người',
+    execution: 'Cầu thủ p1 chuyền bóng cho p2, p2 quan sát kiểm tra vai mở thân người đón bóng và chạm bước một tịnh tiến',
+  });
+
+  assert.ok(diag.animation);
+  const anim = diag.animation!;
+  assert.ok(Array.isArray(anim.steps) && anim.steps.length >= 2);
+
+  // 1. Animation interpolates smoothly with polished motion options enabled
+  const stateStart = interpolateAnimationState(diag, 0, DEFAULT_POLISHED_MOTION_OPTIONS);
+  assert.equal(stateStart.players.length, 16);
+  assert.ok(stateStart.balls.length >= 1);
+
+  // 2. Player positions stay strictly within diagram pitch bounds
+  const stateMid = interpolateAnimationState(diag, anim.duration * 0.5, DEFAULT_POLISHED_MOTION_OPTIONS);
+  for (const p of stateMid.players) {
+    assert.ok(p.x >= 0 && p.x <= 100, `Player ${p.id} x (${p.x}) is within pitch bounds`);
+    assert.ok(p.y >= 0 && p.y <= 100, `Player ${p.id} y (${p.y}) is within pitch bounds`);
+  }
+
+  // 3. Ball positions stay strictly within diagram pitch bounds
+  for (const b of stateMid.balls) {
+    assert.ok(b.x >= 0 && b.x <= 100, `Ball ${b.id} x (${b.x}) is within pitch bounds`);
+    assert.ok(b.y >= 0 && b.y <= 100, `Ball ${b.id} y (${b.y}) is within pitch bounds`);
+  }
+
+  // 4. Spacing safety prevents player marker stacking
+  for (let i = 0; i < stateMid.players.length; i++) {
+    for (let j = i + 1; j < stateMid.players.length; j++) {
+      const pA = stateMid.players[i];
+      const pB = stateMid.players[j];
+      const d = Math.sqrt(Math.pow(pB.x - pA.x, 2) + Math.pow(pB.y - pA.y, 2));
+      assert.ok(d >= 1.0, `Players ${pA.id} and ${pB.id} maintain separation (${d} >= 1.0)`);
+    }
+  }
+
+  // 5. Sequence continuity from D7C remains intact
+  if (anim.coachingSequence) {
+    const markers = getSequenceTimelineMarkers(anim, 0, null, new Set());
+    assert.ok(markers.length >= 2);
+  }
+
+  // 6. Validation passes with 0 errors
+  const valRes = validateDiagramAnimation(anim, diag.players, diag.balls);
+  assert.equal(valRes.ok, true);
+  assert.deepEqual(valRes.errors, []);
 });
 
 

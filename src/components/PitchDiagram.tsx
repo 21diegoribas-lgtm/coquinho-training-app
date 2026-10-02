@@ -12,6 +12,7 @@ import {
   buildSemanticAnimation,
   buildWavyPath,
   calculateCameraViewBox,
+  DEFAULT_POLISHED_MOTION_OPTIONS,
   formatCoachingOverlayText,
   getCoachingPhaseState,
   getCoachingSequenceProgress,
@@ -219,7 +220,11 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
         balls: Array.isArray(diagram.balls) ? diagram.balls : [],
       };
     }
-    return interpolateAnimationState({ ...diagram, animation: effectiveAnimation }, currentTime);
+    return interpolateAnimationState(
+      { ...diagram, animation: effectiveAnimation },
+      currentTime,
+      DEFAULT_POLISHED_MOTION_OPTIONS
+    );
   }, [diagram, effectiveAnimation, isPlaying, currentTime]);
 
   const players = displayState.players;
