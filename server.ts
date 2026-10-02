@@ -1220,8 +1220,16 @@ app.post('/api/tts', async (req: Request, res: Response) => {
       });
     }
 
-    // Check in-memory server cache
-    const cacheKey = `${ttsProvider}:${ttsModel}:${ttsVoice}:${safeText.toLowerCase()}`;
+    const coachingStyleInstruction =
+      'Đọc bằng tiếng Việt, giọng huấn luyện viên bóng đá, rõ ràng, dứt khoát, tốc độ vừa phải, tự nhiên.';
+
+    // Check in-memory server cache (includes style instruction to prevent stale reused audio)
+    const effectiveModel = ttsModel || 'gemini-3.8-flash-tts';
+    const effectiveVoice = ttsVoice && ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'].includes(ttsVoice)
+      ? ttsVoice
+      : 'Kore';
+
+    const cacheKey = `${ttsProvider}:${effectiveModel}:${effectiveVoice}:${coachingStyleInstruction}:${safeText.toLowerCase()}`;
     const cached = ttsServerCache.get(cacheKey);
     if (cached) {
       res.setHeader('Content-Type', cached.contentType);
@@ -1240,28 +1248,64 @@ app.post('/api/tts', async (req: Request, res: Response) => {
         });
       }
 
-      const effectiveModel = ttsModel || 'gemini-3.8-flash-lite-tts';
-      const effectiveVoice = ttsVoice && ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'].includes(ttsVoice)
-        ? ttsVoice
-        : 'Kore';
-
-      const response = await client.models.generateContent({
-        model: effectiveModel,
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: safeText }],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: effectiveVoice },
+      let response;
+      try {
+        response = await client.models.generateContent({
+          model: effectiveModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: safeText,
+                  speechMetadata: {
+                    style: coachingStyleInstruction,
+                  },
+                },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: effectiveVoice },
+              },
             },
           },
-        },
-      });
+        });
+      } catch (geminiErr: any) {
+        // Resilient fallback: if primary model is rate-limited on free tier, retry with gemini-3.8-flash-tts
+        if (effectiveModel !== 'gemini-3.8-flash-tts' && (geminiErr?.status === 429 || geminiErr?.message?.includes('429'))) {
+          console.warn('[tts] Rate limit on primary TTS model, retrying with gemini-3.8-flash-tts');
+          response = await client.models.generateContent({
+            model: 'gemini-3.8-flash-tts',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: safeText,
+                    speechMetadata: {
+                      style: coachingStyleInstruction,
+                    },
+                  },
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: effectiveVoice },
+                },
+              },
+            },
+          });
+        } else {
+          throw geminiErr;
+        }
+      }
 
       const part = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
       if (!part?.data) {

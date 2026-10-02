@@ -32,10 +32,10 @@ test('TTS-A1: generateNarrationScript generates concise Vietnamese scripts from 
   assert.equal(s1, 'Kiểm tra vai trước khi bóng đến.');
 
   const s2 = generateNarrationScript({ title: 'Mở thân người' });
-  assert.equal(s2, 'Mở thân người để hướng về phía chơi tiếp theo.');
+  assert.equal(s2, 'Mở thân người về hướng chơi tiếp theo.');
 
   const s3 = generateNarrationScript({ title: 'Chạm bước một' });
-  assert.equal(s3, 'Chạm bước một đưa bóng vào không gian thuận lợi.');
+  assert.equal(s3, 'Chạm bước một đưa bóng vào khoảng trống.');
 
   // Other common football cues
   const s4 = generateNarrationScript({ title: 'Chuẩn bị đón bóng' });
@@ -56,11 +56,11 @@ test('TTS-A1: generateNarrationScript matches events and text fallbacks determin
   );
   assert.equal(
     generateNarrationScript({ event: 'receive' }),
-    'Mở thân người để hướng về phía chơi tiếp theo.'
+    'Mở thân người về hướng chơi tiếp theo.'
   );
   assert.equal(
     generateNarrationScript({ event: 'firstTouch' }),
-    'Chạm bước một đưa bóng vào không gian thuận lợi.'
+    'Chạm bước một đưa bóng vào khoảng trống.'
   );
 
   // Text-based fallback when title is generic
@@ -110,8 +110,8 @@ test('TTS-A1: sortNarrationChronologically sorts items strictly by presentation 
       coachingMomentId: 'coach3',
       startPresentationTime: 12.0,
       maxDuration: 2.6,
-      text: 'Chạm bước một đưa bóng vào không gian thuận lợi.',
-      estimatedSpeechDuration: 2.55,
+      text: 'Chạm bước một đưa bóng vào khoảng trống.',
+      estimatedSpeechDuration: 2.05,
     },
     {
       id: 'narr-1',
@@ -126,8 +126,8 @@ test('TTS-A1: sortNarrationChronologically sorts items strictly by presentation 
       coachingMomentId: 'coach2',
       startPresentationTime: 7.1,
       maxDuration: 2.6,
-      text: 'Mở thân người để hướng về phía chơi tiếp theo.',
-      estimatedSpeechDuration: 2.55,
+      text: 'Mở thân người về hướng chơi tiếp theo.',
+      estimatedSpeechDuration: 2.05,
     },
   ];
 
@@ -152,8 +152,8 @@ test('TTS-A1: preventNarrationOverlap clamps overlapping slots and refits text',
       coachingMomentId: 'coach2',
       startPresentationTime: 4.0,
       maxDuration: 2.5,
-      text: 'Mở thân người để hướng về phía chơi tiếp theo.',
-      estimatedSpeechDuration: 2.55,
+      text: 'Mở thân người về hướng chơi tiếp theo.',
+      estimatedSpeechDuration: 2.05,
     },
   ];
 
@@ -193,8 +193,8 @@ test('TTS-A1 TEST CASE: 16 players, 8 pairs, Nhận bóng mở thân người re
 
   // Verify requirement: concise Vietnamese text
   assert.equal(items[0].text, 'Kiểm tra vai trước khi bóng đến.');
-  assert.equal(items[1].text, 'Mở thân người để hướng về phía chơi tiếp theo.');
-  assert.equal(items[2].text, 'Chạm bước một đưa bóng vào không gian thuận lợi.');
+  assert.equal(items[1].text, 'Mở thân người về hướng chơi tiếp theo.');
+  assert.equal(items[2].text, 'Chạm bước một đưa bóng vào khoảng trống.');
 
   // Verify requirement: each starts in hold phase
   // In FIX-A, hold phase starts after enter transition: startPresentationTime = momentPresentationStart + COACHING_ENTER_DURATION
@@ -475,8 +475,8 @@ test('TTS-A2: scheduling times and base offset positioning', async () => {
       coachingMomentId: 'c2',
       startPresentationTime: 7.0,
       maxDuration: 2.5,
-      text: 'Mở thân người để hướng về phía chơi tiếp theo.',
-      estimatedSpeechDuration: 2.2,
+      text: 'Mở thân người về hướng chơi tiếp theo.',
+      estimatedSpeechDuration: 2.05,
     },
   ];
 

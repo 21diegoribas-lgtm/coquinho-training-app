@@ -1130,8 +1130,8 @@ test('TTS-A3b: narration preparation before export requests items in coaching or
     // Verify exactly 3 narration items requested in coaching order
     assert.equal(requestedItems.length, 3);
     assert.equal(requestedItems[0], 'Kiểm tra vai trước khi bóng đến.');
-    assert.equal(requestedItems[1], 'Mở thân người để hướng về phía chơi tiếp theo.');
-    assert.equal(requestedItems[2], 'Chạm bước một đưa bóng vào không gian thuận lợi.');
+    assert.equal(requestedItems[1], 'Mở thân người về hướng chơi tiếp theo.');
+    assert.equal(requestedItems[2], 'Chạm bước một đưa bóng vào khoảng trống.');
 
     // Verify narration status UI was emitted
     assert.equal(statusEmitted, 'Đang chuẩn bị giọng đọc...');

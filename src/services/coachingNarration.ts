@@ -58,8 +58,8 @@ export const DEFAULT_VIETNAMESE_COACHING_WPM = 240;
  */
 export const CANONICAL_COACHING_SCRIPTS: Record<string, string> = {
   'kiểm tra vai': 'Kiểm tra vai trước khi bóng đến.',
-  'mở thân người': 'Mở thân người để hướng về phía chơi tiếp theo.',
-  'chạm bước một': 'Chạm bước một đưa bóng vào không gian thuận lợi.',
+  'mở thân người': 'Mở thân người về hướng chơi tiếp theo.',
+  'chạm bước một': 'Chạm bước một đưa bóng vào khoảng trống.',
   'chuẩn bị đón bóng': 'Chuẩn bị đón bóng chính xác từ đồng đội.',
   'tiếp bóng an toàn': 'Tiếp bóng an toàn bằng lòng bàn chân.',
   'chuyền trả bóng': 'Chuyền trả bóng chính xác cho đồng đội.',
@@ -74,7 +74,9 @@ export const CANONICAL_COACHING_SCRIPTS: Record<string, string> = {
  */
 export const CANONICAL_SHORT_SCRIPTS: Record<string, string> = {
   'kiểm tra vai trước khi bóng đến.': 'Kiểm tra vai trước bóng.',
+  'mở thân người về hướng chơi tiếp theo.': 'Mở thân người hướng chơi tiếp.',
   'mở thân người để hướng về phía chơi tiếp theo.': 'Mở thân người hướng chơi tiếp.',
+  'chạm bước một đưa bóng vào khoảng trống.': 'Chạm bước một vào khoảng trống.',
   'chạm bước một đưa bóng vào không gian thuận lợi.': 'Chạm bước một vào khoảng trống.',
   'chuẩn bị đón bóng chính xác từ đồng đội.': 'Chuẩn bị đón bóng.',
   'tiếp bóng an toàn bằng lòng bàn chân.': 'Tiếp bóng an toàn.',
@@ -107,10 +109,10 @@ export function generateNarrationScript(
     return 'Kiểm tra vai trước khi bóng đến.';
   }
   if (/mở thân|open body|tư thế mở/i.test(titleLower)) {
-    return 'Mở thân người để hướng về phía chơi tiếp theo.';
+    return 'Mở thân người về hướng chơi tiếp theo.';
   }
   if (/chạm bước một|first touch|bước một/i.test(titleLower)) {
-    return 'Chạm bước một đưa bóng vào không gian thuận lợi.';
+    return 'Chạm bước một đưa bóng vào khoảng trống.';
   }
   if (/chuẩn bị đón bóng|chuẩn bị/i.test(titleLower)) {
     return 'Chuẩn bị đón bóng chính xác từ đồng đội.';
@@ -136,10 +138,10 @@ export function generateNarrationScript(
     return 'Kiểm tra vai trước khi bóng đến.';
   }
   if (moment.event === 'receive') {
-    return 'Mở thân người để hướng về phía chơi tiếp theo.';
+    return 'Mở thân người về hướng chơi tiếp theo.';
   }
   if (moment.event === 'firstTouch') {
-    return 'Chạm bước một đưa bóng vào không gian thuận lợi.';
+    return 'Chạm bước một đưa bóng vào khoảng trống.';
   }
 
   // 4. Derive concise first sentence from moment.text if present
