@@ -1174,10 +1174,20 @@ app.post('/api/generate-plan', async (req: Request, res: Response) => {
 });
 
 /**
- * Text-to-Speech (TTS) Proxy Endpoint (TASK TTS-A3a).
+ * In-memory server-side cache for synthesized speech audio buffers.
+ * Avoids duplicate API calls, eliminates latency for repeated drills, and respects rate limits.
+ */
+const ttsServerCache = new Map<string, { buffer: Buffer; contentType: string }>();
+
+/**
+ * Text-to-Speech (TTS) Proxy Endpoint (TASK TTS-A3a & TTS-B1).
  * 
- * Secure server-side proxy converting Vietnamese narration text into audio/mpeg bytes.
+ * Secure server-side proxy converting Vietnamese narration text into audio bytes.
  * Never exposes API keys or secrets to the browser.
+ * Supports:
+ * - Gemini TTS via @google/genai (TTS_PROVIDER=gemini or google)
+ * - Google Cloud Text-to-Speech REST API (TTS_PROVIDER=google-cloud)
+ * - OpenAI TTS (TTS_PROVIDER=openai)
  * Returns 503 TTS_UNAVAILABLE when no external TTS provider is configured in environment.
  */
 app.post('/api/tts', async (req: Request, res: Response) => {
@@ -1196,10 +1206,10 @@ app.post('/api/tts', async (req: Request, res: Response) => {
     // Length safety clamp (max 300 characters)
     const safeText = cleanText.slice(0, 300);
 
-    const ttsProvider = process.env.TTS_PROVIDER;
-    const ttsApiKey = process.env.TTS_API_KEY;
-    const ttsVoice = voice || process.env.TTS_VOICE || 'vi-VN-Standard-A';
-    const ttsModel = model || process.env.TTS_MODEL;
+    const ttsProvider = process.env.TTS_PROVIDER?.toLowerCase().trim();
+    const ttsApiKey = process.env.TTS_API_KEY || (ttsProvider === 'gemini' || ttsProvider === 'google' ? process.env.GEMINI_API_KEY : undefined);
+    const ttsVoice = voice || process.env.TTS_VOICE || (ttsProvider === 'gemini' || ttsProvider === 'google' ? 'Kore' : 'vi-VN-Standard-A');
+    const ttsModel = model || process.env.TTS_MODEL || (ttsProvider === 'gemini' || ttsProvider === 'google' ? 'gemini-3.8-flash-lite-tts' : undefined);
 
     // Check if an external TTS provider is configured
     if (!ttsProvider && !ttsApiKey) {
@@ -1210,8 +1220,68 @@ app.post('/api/tts', async (req: Request, res: Response) => {
       });
     }
 
-    // Google Cloud Text-to-Speech REST API
-    if (ttsProvider === 'google-cloud' || ttsProvider === 'google') {
+    // Check in-memory server cache
+    const cacheKey = `${ttsProvider}:${ttsModel}:${ttsVoice}:${safeText.toLowerCase()}`;
+    const cached = ttsServerCache.get(cacheKey);
+    if (cached) {
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Content-Length', cached.buffer.length);
+      res.setHeader('X-Cache', 'HIT');
+      return res.send(cached.buffer);
+    }
+
+    // 1. Google Gemini Text-to-Speech via official @google/genai SDK
+    if (ttsProvider === 'gemini' || ttsProvider === 'google') {
+      const client = ai || (ttsApiKey ? new GoogleGenAI({ apiKey: ttsApiKey }) : null);
+      if (!client) {
+        return res.status(503).json({
+          error: 'Gemini API client chưa được cấu hình trên máy chủ.',
+          code: 'TTS_UNAVAILABLE',
+        });
+      }
+
+      const effectiveModel = ttsModel || 'gemini-3.8-flash-lite-tts';
+      const effectiveVoice = ttsVoice && ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'].includes(ttsVoice)
+        ? ttsVoice
+        : 'Kore';
+
+      const response = await client.models.generateContent({
+        model: effectiveModel,
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: safeText }],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: effectiveVoice },
+            },
+          },
+        },
+      });
+
+      const part = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      if (!part?.data) {
+        return res.status(502).json({ error: 'Không nhận được dữ liệu âm thanh từ Gemini TTS' });
+      }
+
+      const audioBuffer = Buffer.from(part.data, 'base64');
+      const contentType = part.mimeType || 'audio/wav';
+
+      // Cache successful response in memory
+      ttsServerCache.set(cacheKey, { buffer: audioBuffer, contentType });
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', audioBuffer.length);
+      res.setHeader('X-Cache', 'MISS');
+      return res.send(audioBuffer);
+    }
+
+    // 2. Google Cloud Text-to-Speech REST API
+    if (ttsProvider === 'google-cloud') {
       const response = await fetch(
         `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ttsApiKey}`,
         {
@@ -1237,12 +1307,17 @@ app.post('/api/tts', async (req: Request, res: Response) => {
       }
 
       const audioBuffer = Buffer.from(data.audioContent, 'base64');
-      res.setHeader('Content-Type', 'audio/mpeg');
+      const contentType = 'audio/mpeg';
+
+      ttsServerCache.set(cacheKey, { buffer: audioBuffer, contentType });
+
+      res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', audioBuffer.length);
+      res.setHeader('X-Cache', 'MISS');
       return res.send(audioBuffer);
     }
 
-    // OpenAI TTS
+    // 3. OpenAI TTS
     if (ttsProvider === 'openai') {
       const response = await fetch('https://api.openai.com/v1/audio/speech', {
         method: 'POST',
@@ -1265,8 +1340,13 @@ app.post('/api/tts', async (req: Request, res: Response) => {
 
       const arrayBuf = await response.arrayBuffer();
       const audioBuffer = Buffer.from(arrayBuf);
-      res.setHeader('Content-Type', 'audio/mpeg');
+      const contentType = 'audio/mpeg';
+
+      ttsServerCache.set(cacheKey, { buffer: audioBuffer, contentType });
+
+      res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', audioBuffer.length);
+      res.setHeader('X-Cache', 'MISS');
       return res.send(audioBuffer);
     }
 
