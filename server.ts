@@ -8,7 +8,7 @@ import { normalizeDurationsToTotal } from './src/services/durationUtils.ts';
 import { sanitizeGeminiPlan, validateGeminiPlan } from './src/services/planValidation.ts';
 import { BlockType, GameFormat, SessionDuration } from './src/types/session.ts';
 import { formatPhaseContent, gameFormatTacticalGuidance } from './src/services/gameFormatContext.ts';
-import { finalGameTitle } from './src/services/sessionConsistency.ts';
+import { finalGameTitle, titleMatchesOrganization } from './src/services/sessionConsistency.ts';
 import { buildDefaultStructuredDiagram } from './src/services/structuredDiagram.ts';
 
 dotenv.config();
@@ -25,7 +25,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-const GEMINI_MODEL_TIMEOUT_MS = 25000;
+const GEMINI_MODEL_TIMEOUT_MS = 10000;
 
 app.use(express.json());
 
@@ -675,7 +675,7 @@ export function generateRealisticFootballPlan(
       },
       {
         phase: 'Phát triển kỹ năng',
-        exerciseName: 'Kiểm soát bóng 4v4 (+2 Joker tự do) chuyển hướng sang khu vực đích',
+        exerciseName: 'Kiểm soát bóng chuyển hướng sang khu vực đích',
         area: '35 × 25 m chia 3 khu vực',
         equipment: ['10 Nón tập', '8 Quả bóng', 'Áo bib 3 màu'],
         organization: `Sân chia làm 3 khu vực. Hai đội tranh chấp ở giữa, cầu thủ tự do đứng ở hai đầu biên. `,
@@ -739,7 +739,7 @@ export function generateRealisticFootballPlan(
       },
       {
         phase: 'Kỹ thuật',
-        exerciseName: 'Đấu tay đôi 1v1 trực diện qua cổng hẹp',
+        exerciseName: 'Đấu tay đôi trực diện qua cổng hẹp',
         area: '15 × 10 m (3 làn song song)',
         equipment: ['12 Nón tập', '1 Bóng / làn', 'Cổng nón 2m'],
         organization: `Thiết lập 3 làn tập song song để toàn bộ cầu thủ hoạt động cùng lúc. `,
@@ -753,7 +753,7 @@ export function generateRealisticFootballPlan(
       },
       {
         phase: 'Phát triển kỹ năng',
-        exerciseName: 'Tình huống 2v2 (+1 Hậu vệ bọc lót)',
+        exerciseName: 'Tình huống áp sát và bọc lót khu vực',
         area: '25 × 20 m có 2 khung thành nhỏ',
         equipment: ['8 Nón tập', '2 Cầu môn nhỏ', 'Áo bib 2 màu'],
         organization: `Bố trí sân với 2 khung thành nhỏ. Hai tiền đạo tấn công 2 hậu vệ phòng ngự. `,
@@ -767,10 +767,10 @@ export function generateRealisticFootballPlan(
       },
       {
         phase: 'Tình huống đối kháng',
-        exerciseName: 'Trò chơi nhỏ 4v4 bảo vệ 4 cầu môn mini',
+        exerciseName: 'Trò chơi nhỏ bảo vệ 4 cầu môn mini',
         area: '35 × 25 m',
         equipment: ['4 Cầu môn mini', 'Bóng tập', 'Áo bib 2 màu'],
-        organization: `Sân chia 2 nửa. Hai đội thi đấu 4v4 với nhiệm vụ bảo vệ 2 cầu môn mini sân nhà và tấn công 2 cầu môn đối diện. `,
+        organization: `Sân chia 2 nửa. Hai đội thi đấu với nhiệm vụ bảo vệ 2 cầu môn mini sân nhà và tấn công 2 cầu môn đối diện. `,
         execution: 'Đội phòng ngự phải giữ khối cự ly chặt chẽ, ép đối phương chơi bóng ra biên và cô lập cầu thủ cầm bóng để tranh chấp tay đôi. Đội cướp bóng thành công và ghi bàn trong vòng 10 giây được tính 2 điểm; bàn thắng bình thường tính 1 điểm.',
         coachingPoints: [
           'Cả khối dịch chuyển đồng bộ theo hướng bóng.',
@@ -785,9 +785,9 @@ export function generateRealisticFootballPlan(
         area: '50 × 35 m',
         equipment: ['2 Cầu môn tiêu chuẩn', 'Bóng thi đấu', 'Áo bib 2 màu'],
         organization: `Thi đấu có thủ môn, áp dụng đầy đủ luật thi đấu. `,
-        execution: 'Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn. Áp dụng toàn bộ luật thi đấu chuẩn mực. Bàn thắng bình thường luôn luôn tính 1 điểm hợp lệ. Chỉ áp dụng một luật thưởng điểm đơn giản: bàn thắng xuất phát từ pha đoạt bóng 1v1 thành công ở nửa sân đối phương được tính 2 điểm. Cầu thủ hoàn toàn tự do ra quyết định, huấn luyện viên can thiệp tối thiểu.',
+        execution: 'Trận đấu thực chiến trên sân tiêu chuẩn với 2 khung thành có thủ môn. Áp dụng toàn bộ luật thi đấu chuẩn mực. Bàn thắng bình thường luôn luôn tính 1 điểm hợp lệ. Chỉ áp dụng một luật thưởng điểm đơn giản: bàn thắng xuất phát từ pha đoạt bóng thành công ở nửa sân đối phương được tính 2 điểm. Cầu thủ hoàn toàn tự do ra quyết định, huấn luyện viên can thiệp tối thiểu.',
         coachingPoints: [
-          'Chuyển hóa kỹ năng phòng ngự 1v1 và bọc lót vào các pha bóng thực tế.',
+          'Chuyển hóa kỹ năng phòng ngự và bọc lót vào các pha bóng thực tế.',
           'Cầu thủ tự chủ phán đoán thời điểm tắc bóng hoặc kìm hãm đối phương.',
           'Huấn luyện viên can thiệp tối thiểu để đánh giá tính kỷ luật vị trí của cầu thủ.',
         ],
@@ -814,7 +814,7 @@ export function generateRealisticFootballPlan(
       },
       {
         phase: 'Kỹ thuật',
-        exerciseName: 'Rondo 4v2 / 5v2 ép hướng bóng và cắt đường chuyền',
+        exerciseName: 'Rondo ép hướng bóng và cắt đường chuyền',
         area: '12 × 12 m (chia 2-3 ô)',
         equipment: ['Nón nấm', 'Bóng', 'Áo bib'],
         organization: `Chia các ô vuông 12 × 12 m để phân tán toàn bộ cầu thủ. `,
@@ -828,7 +828,7 @@ export function generateRealisticFootballPlan(
       },
       {
         phase: 'Phát triển kỹ năng',
-        exerciseName: 'Tình huống phát bóng lên: 4 Hậu vệ vs 3 Tiền đạo pressing',
+        exerciseName: 'Tình huống phát bóng lên: Hậu vệ vs Tiền đạo pressing',
         area: 'Nửa sân',
         equipment: ['Cầu môn lớn + 2 cầu môn nhỏ', 'Bóng', 'Áo bib'],
         organization: `Đội phòng ngự phát bóng từ thủ môn, đội tấn công bố trí 3-4 cầu thủ pressing ngay rìa vòng cấm. `,
@@ -1007,34 +1007,40 @@ export function generateRealisticFootballPlan(
 
   // Construct final conforming phases
   const phases = phasesData.map((p, idx) => {
+    const playerOrg = toPlayerOrganization(players, blockTypes[idx]);
     const { spatialSetup, ...content } = formatPhaseContent(gameFormat as GameFormat, blockTypes[idx], cleanTopic, {
-      ...p, exerciseName: idx === phasesData.length - 1 ? finalGameTitle(gameFormat as GameFormat, toPlayerOrganization(players, blockTypes[idx])) : p.exerciseName,
+      ...p, exerciseName: idx === phasesData.length - 1 ? finalGameTitle(gameFormat as GameFormat, playerOrg) : p.exerciseName,
     });
+    const orgText = `${formatFromOrganization(players, playerOrg)}. ${spatialSetup}`;
+    let exerciseName = content.exerciseName;
+    if (idx < phasesData.length - 1 && !titleMatchesOrganization(exerciseName, orgText, playerOrg)) {
+      exerciseName = exerciseName.replace(/\b\d+\s*v\s*\d+(?:\s*\(?\s*\+\s*\d+\s*(?:jokers?|neutrals?|cầu thủ tự do)[^)]*\)?)?/gi, '').replace(/\s{2,}/g, ' ').trim();
+    }
     return {
-    id: `phase-${idx + 1}`,
-    phase: p.phase,
-    exerciseName: content.exerciseName,
-    duration: durations[idx],
-    players: players,
-    area: idx === 4 ? finalGameArea : defaultAreas[idx],
-    equipment: content.equipment || p.equipment,
-    organization: `${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}. ${spatialSetup}`,
-    execution: content.execution,
-    coachingPoints: content.coachingPoints,
-    progression: content.progression,
-    playerOrganization: toPlayerOrganization(players, blockTypes[idx]),
-    diagram: buildDefaultStructuredDiagram({
-      blockType: blockTypes[idx],
-      playerCount: players,
-      playerOrganization: toPlayerOrganization(players, blockTypes[idx]),
-      exerciseName: content.exerciseName,
-      topic: cleanTopic,
-      organization: `${formatFromOrganization(players, toPlayerOrganization(players, blockTypes[idx]))}. ${spatialSetup}`,
-      execution: content.execution,
-      equipment: content.equipment || p.equipment,
+      id: `phase-${idx + 1}`,
+      phase: p.phase,
+      exerciseName,
+      duration: durations[idx],
+      players: players,
       area: idx === 4 ? finalGameArea : defaultAreas[idx],
-      gameFormat: gameFormat as GameFormat,
-    }),
+      equipment: content.equipment || p.equipment,
+      organization: orgText,
+      execution: content.execution,
+      coachingPoints: content.coachingPoints,
+      progression: content.progression,
+      playerOrganization: playerOrg,
+      diagram: buildDefaultStructuredDiagram({
+        blockType: blockTypes[idx],
+        playerCount: players,
+        playerOrganization: playerOrg,
+        exerciseName,
+        topic: cleanTopic,
+        organization: orgText,
+        execution: content.execution,
+        equipment: content.equipment || p.equipment,
+        area: idx === 4 ? finalGameArea : defaultAreas[idx],
+        gameFormat: gameFormat as GameFormat,
+      }),
     };
   });
 
@@ -1094,12 +1100,13 @@ app.post('/api/generate-plan', async (req: Request, res: Response) => {
 
     // 2. Attempt Gemini generation with fast fallback
     const modelsToTry = [
-  "gemini-3.1-flash-lite",
-  "gemini-3.6-flash",
-  "gemini-3.8-flash"
-];
+      'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+    ];
 
-    for (const model of ai ? modelsToTry : []) {
+    const forceFallback = req.headers['x-fallback-only'] === 'true';
+
+    for (const model of (ai && !forceFallback) ? modelsToTry : []) {
       try {
         const response = await ai!.models.generateContent({
           model,
@@ -1137,12 +1144,27 @@ app.post('/api/generate-plan', async (req: Request, res: Response) => {
       };
     }
 
-    const safePlan = sanitizeGeminiPlan(parsedPlan, {
+    let safePlan = sanitizeGeminiPlan(parsedPlan, {
       topic: cleanFocus,
       players: playerCount,
       duration: durationNum as SessionDuration,
       gameFormat: cleanGameFormat,
     });
+
+    if (!safePlan) {
+      console.warn('[generate-plan] Initial plan sanitization failed, using guaranteed realistic generator');
+      const guaranteed = generateRealisticFootballPlan(playerCount, cleanFocus, durationNum, cleanGameFormat);
+      safePlan = sanitizeGeminiPlan(
+        { ...guaranteed, generationSource: 'fallback' },
+        {
+          topic: cleanFocus,
+          players: playerCount,
+          duration: durationNum as SessionDuration,
+          gameFormat: cleanGameFormat,
+        }
+      );
+    }
+
     if (!safePlan) throw new Error('Invalid generated plan');
     return res.json(safePlan);
   } catch (error: any) {

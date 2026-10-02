@@ -19,7 +19,7 @@ for (const scenario of cases) {
   test(`16 players, Nhận bóng mở thân người, 90 min: ${scenario.format}`, async () => {
     assert.ok(process.env.C2_API_URL, 'Set C2_API_URL to the isolated fallback test server');
     const response = await fetch(`${process.env.C2_API_URL}/api/generate-plan`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-fallback-only': 'true' },
       body: JSON.stringify({ players: 16, trainingFocus: 'Nhận bóng mở thân người', duration: 90, gameFormat: scenario.format }),
     });
     assert.equal(response.status, 200);
