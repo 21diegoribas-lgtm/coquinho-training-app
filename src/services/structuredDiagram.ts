@@ -1182,6 +1182,149 @@ export function buildCoachingSequence(
   };
 }
 
+export interface CoachingSequenceProgress {
+  current: number; // 1-based index (e.g. 1, 2, 3), or 0 if none
+  total: number; // Total valid sequence moments
+  isSequence: boolean; // True if total >= 2 and current > 0
+  activeMomentId?: string;
+  momentIds: string[]; // Valid, unique, chronological moment IDs in sequence
+}
+
+/**
+ * Pure helper to determine current sequence index and total valid sequence moments.
+ * Safely filters out missing/invalid/duplicate IDs and orders chronologically.
+ * If fewer than 2 valid moments remain, isSequence is false (indicator is hidden).
+ */
+export function getCoachingSequenceProgress(
+  activeMomentId?: string | null,
+  sequence?: DiagramCoachingSequence | null,
+  moments?: DiagramCoachingMoment[] | null
+): CoachingSequenceProgress {
+  if (!sequence || !Array.isArray(sequence.momentIds) || sequence.momentIds.length === 0) {
+    return {
+      current: 0,
+      total: 0,
+      isSequence: false,
+      momentIds: [],
+    };
+  }
+
+  const hasMoments = Array.isArray(moments) && moments.length > 0;
+  const momentMap = new Map<string, DiagramCoachingMoment>();
+  if (hasMoments) {
+    moments!.forEach((m) => {
+      if (m && typeof m.id === 'string' && m.id.trim()) {
+        momentMap.set(m.id.trim(), m);
+      }
+    });
+  }
+
+  const validIds: string[] = [];
+  const seenIds = new Set<string>();
+
+  for (const rawId of sequence.momentIds) {
+    if (typeof rawId !== 'string') continue;
+    const cleanId = rawId.trim();
+    if (!cleanId || seenIds.has(cleanId)) {
+      continue;
+    }
+    if (hasMoments && !momentMap.has(cleanId)) {
+      // Safely ignore references to non-existent coaching moments
+      continue;
+    }
+    seenIds.add(cleanId);
+    validIds.push(cleanId);
+  }
+
+  // Ensure chronological order if moment time is available
+  if (hasMoments) {
+    validIds.sort((a, b) => {
+      const timeA = momentMap.get(a)?.time ?? 0;
+      const timeB = momentMap.get(b)?.time ?? 0;
+      return timeA - timeB;
+    });
+  }
+
+  const total = validIds.length;
+  const cleanActiveId = typeof activeMomentId === 'string' ? activeMomentId.trim() : undefined;
+  const idx = cleanActiveId ? validIds.indexOf(cleanActiveId) : -1;
+  const current = idx >= 0 ? idx + 1 : 0;
+
+  return {
+    current,
+    total,
+    isSequence: total >= 2 && current > 0,
+    activeMomentId: cleanActiveId,
+    momentIds: validIds,
+  };
+}
+
+/**
+ * Pure helper to determine current sequence index and total valid sequence moments.
+ * Supports flexible parameter signatures:
+ *   getCoachingSequencePosition(activeMomentId, sequence, moments)
+ *   getCoachingSequencePosition(sequence, activeMomentId, moments)
+ */
+export function getCoachingSequencePosition(
+  arg1?: string | DiagramCoachingSequence | null,
+  arg2?: string | DiagramCoachingSequence | null,
+  moments?: DiagramCoachingMoment[] | null
+): CoachingSequenceProgress {
+  let activeMomentId: string | undefined;
+  let sequence: DiagramCoachingSequence | undefined;
+
+  if (typeof arg1 === 'string') {
+    activeMomentId = arg1;
+    if (typeof arg2 === 'object' && arg2 !== null) {
+      sequence = arg2 as DiagramCoachingSequence;
+    }
+  } else if (typeof arg1 === 'object' && arg1 !== null) {
+    sequence = arg1 as DiagramCoachingSequence;
+    if (typeof arg2 === 'string') {
+      activeMomentId = arg2;
+    }
+  } else if (typeof arg2 === 'string') {
+    activeMomentId = arg2;
+  }
+
+  return getCoachingSequenceProgress(activeMomentId, sequence, moments);
+}
+
+/**
+ * Pure helper to update triggered moments state during manual scrub.
+ * Forward seek marks historical moments as triggered so they don't pop up suddenly.
+ * Backward seek restores eligibility for moments after newTime so they can trigger again naturally.
+ */
+export function updateSeekTriggerState(
+  newTime: number,
+  moments: DiagramCoachingMoment[],
+  triggeredIds: Set<string>
+): Set<string> {
+  const nextSet = new Set(triggeredIds);
+  (moments || []).forEach((m) => {
+    if (m.time >= newTime) {
+      nextSet.delete(m.id);
+    } else {
+      nextSet.add(m.id);
+    }
+  });
+  return nextSet;
+}
+
+/**
+ * Pure helper to check if a coaching moment should trigger during playback tick.
+ */
+export function shouldTriggerCoachingMoment(
+  moment: DiagramCoachingMoment,
+  prevTime: number,
+  nextTime: number,
+  triggeredIds: Set<string>
+): boolean {
+  if (!moment || typeof moment.time !== 'number') return false;
+  if (triggeredIds.has(moment.id)) return false;
+  return moment.time >= prevTime - 0.05 && moment.time <= nextTime + 0.05;
+}
+
 /**
  * Builds semantically grounded coaching moments for an animation sequence.
  * Targets the receiving player immediately before or at reception.

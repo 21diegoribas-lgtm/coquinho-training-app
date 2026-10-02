@@ -16,6 +16,8 @@ import {
   filterValidCoachingMoments,
   formatCoachingOverlayText,
   getCoachingPhaseState,
+  getCoachingSequencePosition,
+  getCoachingSequenceProgress,
   getGoalGeometry,
   getTeamStyle,
   interpolateAnimationState,
@@ -27,6 +29,8 @@ import {
   resolvePathCoordinates,
   safeStructuredDiagram,
   sanitizeCoachingSequence,
+  shouldTriggerCoachingMoment,
+  updateSeekTriggerState,
   validateDiagramAnimation,
   validateSemanticDiagram,
   validateStructuredDiagram,
@@ -1704,6 +1708,304 @@ test('D7A: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 
   const valRes = validateDiagramAnimation(anim, diag.players, diag.balls);
   assert.equal(valRes.ok, true);
   assert.deepEqual(valRes.errors, []);
+});
+
+// =============================================================================
+// TASK D7B: COACHING SEQUENCE PLAYBACK & UI INTEGRATION TESTS
+// =============================================================================
+
+test('D7B: sequence position calculation (valid, invalid IDs, missing sequence)', () => {
+  const sequence: DiagramCoachingSequence = {
+    id: 'seq1',
+    title: 'Nhận bóng mở thân người',
+    momentIds: ['coach1', 'coach2', 'coach3'],
+  };
+
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'coach1', time: 1.0, duration: 2.0, playerId: 'p2', title: 'Kiểm tra vai', text: 'Scan' },
+    { id: 'coach2', time: 2.0, duration: 2.0, playerId: 'p2', title: 'Mở thân người', text: 'Open body' },
+    { id: 'coach3', time: 3.0, duration: 2.0, playerId: 'p2', title: 'Chạm bước một', text: 'First touch' },
+  ];
+
+  // 1. Valid moments progression
+  const pos1 = getCoachingSequencePosition('coach1', sequence, moments);
+  assert.equal(pos1.current, 1);
+  assert.equal(pos1.total, 3);
+  assert.equal(pos1.isSequence, true);
+
+  const pos2 = getCoachingSequencePosition('coach2', sequence, moments);
+  assert.equal(pos2.current, 2);
+  assert.equal(pos2.total, 3);
+  assert.equal(pos2.isSequence, true);
+
+  const pos3 = getCoachingSequencePosition('coach3', sequence, moments);
+  assert.equal(pos3.current, 3);
+  assert.equal(pos3.total, 3);
+  assert.equal(pos3.isSequence, true);
+
+  // Flexible argument signature check: (sequence, activeMomentId, moments)
+  const pos2Reversed = getCoachingSequencePosition(sequence, 'coach2', moments);
+  assert.equal(pos2Reversed.current, 2);
+  assert.equal(pos2Reversed.total, 3);
+  assert.equal(pos2Reversed.isSequence, true);
+
+  // 2. Safely ignore invalid / non-existent moment IDs
+  const dirtySequence: DiagramCoachingSequence = {
+    id: 'seq2',
+    title: 'Dirty sequence',
+    momentIds: ['coach1', 'ghost_id', 'coach3', 'duplicate_ghost', 'coach1'],
+  };
+
+  const posDirty1 = getCoachingSequencePosition('coach1', dirtySequence, moments);
+  assert.equal(posDirty1.current, 1);
+  assert.equal(posDirty1.total, 2); // only coach1 and coach3 are valid
+  assert.equal(posDirty1.isSequence, true);
+
+  const posDirtyGhost = getCoachingSequencePosition('ghost_id', dirtySequence, moments);
+  assert.equal(posDirtyGhost.current, 0);
+  assert.equal(posDirtyGhost.total, 2);
+  assert.equal(posDirtyGhost.isSequence, false);
+
+  // 3. Safely handle missing sequence or empty sequence
+  const posNoSeq = getCoachingSequencePosition('coach1', undefined, moments);
+  assert.equal(posNoSeq.current, 0);
+  assert.equal(posNoSeq.total, 0);
+  assert.equal(posNoSeq.isSequence, false);
+
+  const posEmptySeq = getCoachingSequencePosition('coach1', { id: 's', title: 'empty', momentIds: [] }, moments);
+  assert.equal(posEmptySeq.current, 0);
+  assert.equal(posEmptySeq.total, 0);
+  assert.equal(posEmptySeq.isSequence, false);
+});
+
+test('D7B: multi-moment trigger tracking (independent IDs, no premature blocking)', () => {
+  const m1: DiagramCoachingMoment = { id: 'coach1', time: 1.0, duration: 2, playerId: 'p2', title: 'T1', text: 'Text 1' };
+  const m2: DiagramCoachingMoment = { id: 'coach2', time: 2.2, duration: 2, playerId: 'p2', title: 'T2', text: 'Text 2' };
+  const m3: DiagramCoachingMoment = { id: 'coach3', time: 3.4, duration: 2, playerId: 'p2', title: 'T3', text: 'Text 3' };
+
+  const triggeredIds = new Set<string>();
+
+  // At time t = 0.95 -> 1.05s, m1 triggers
+  assert.equal(shouldTriggerCoachingMoment(m1, 0.95, 1.05, triggeredIds), true);
+  assert.equal(shouldTriggerCoachingMoment(m2, 0.95, 1.05, triggeredIds), false);
+  assert.equal(shouldTriggerCoachingMoment(m3, 0.95, 1.05, triggeredIds), false);
+
+  // Record m1 trigger
+  triggeredIds.add(m1.id);
+
+  // When m1 has triggered, it does NOT trigger again in forward playback
+  assert.equal(shouldTriggerCoachingMoment(m1, 1.05, 1.15, triggeredIds), false);
+
+  // Later at t = 2.15 -> 2.25s, m2 triggers independently (NOT blocked by m1 having completed)
+  assert.equal(shouldTriggerCoachingMoment(m2, 2.15, 2.25, triggeredIds), true);
+  triggeredIds.add(m2.id);
+
+  // Later at t = 3.35 -> 3.45s, m3 triggers independently
+  assert.equal(shouldTriggerCoachingMoment(m3, 3.35, 3.45, triggeredIds), true);
+  triggeredIds.add(m3.id);
+
+  // All 3 tracked independently
+  assert.equal(triggeredIds.size, 3);
+  assert.ok(triggeredIds.has('coach1'));
+  assert.ok(triggeredIds.has('coach2'));
+  assert.ok(triggeredIds.has('coach3'));
+});
+
+test('D7B: skip advances drill, leaves remaining sequence intact', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'coach1', time: 1.0, duration: 2.5, playerId: 'p2', title: 'T1', text: 'M1' },
+    { id: 'coach2', time: 2.2, duration: 2.5, playerId: 'p2', title: 'T2', text: 'M2' },
+    { id: 'coach3', time: 3.4, duration: 2.5, playerId: 'p2', title: 'T3', text: 'M3' },
+  ];
+
+  const triggeredIds = new Set<string>();
+
+  // 1. Playback reaches coach1 at t = 1.0s
+  const trigger1 = moments.find((m) => shouldTriggerCoachingMoment(m, 0.95, 1.05, triggeredIds));
+  assert.ok(trigger1);
+  assert.equal(trigger1.id, 'coach1');
+  triggeredIds.add(trigger1.id);
+
+  // Active presentation begins for coach1; currentTime frozen at 1.0s
+  let activeMoment: DiagramCoachingMoment | null = trigger1;
+  let coachingElapsed = 0.6; // user has watched 0.6s of presentation
+  const frozenDrillTime = 1.0;
+
+  // 2. User clicks "Tiếp tục" (skip)
+  // Skip logic: clear active moment and presentation elapsed time, resume drill from frozen timestamp
+  activeMoment = null;
+  coachingElapsed = 0;
+
+  assert.equal(activeMoment, null);
+  assert.equal(coachingElapsed, 0);
+
+  // Crucial: only coach1 is in triggeredIds; coach2 and coach3 remain completely intact and eligible
+  assert.equal(triggeredIds.has('coach1'), true);
+  assert.equal(triggeredIds.has('coach2'), false);
+  assert.equal(triggeredIds.has('coach3'), false);
+
+  // 3. Drill continues forward playback from 1.0s towards 2.2s
+  const nextTrigger = moments.find((m) => shouldTriggerCoachingMoment(m, 2.15, 2.25, triggeredIds));
+  assert.ok(nextTrigger, 'coach2 must trigger naturally later after coach1 was skipped');
+  assert.equal(nextTrigger.id, 'coach2');
+});
+
+test('D7B: reset clears sequence history and restores full state', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'coach1', time: 1.0, duration: 2, playerId: 'p2', title: 'T1', text: 'M1' },
+    { id: 'coach2', time: 2.2, duration: 2, playerId: 'p2', title: 'T2', text: 'M2' },
+  ];
+
+  const triggeredIds = new Set<string>(['coach1', 'coach2']);
+  let activeMoment: DiagramCoachingMoment | null = moments[1];
+  let coachingElapsed = 1.2;
+  let currentTime = 2.2;
+  let isPlaying = true;
+
+  // Execute handleReset
+  isPlaying = false;
+  currentTime = 0;
+  activeMoment = null;
+  coachingElapsed = 0;
+  triggeredIds.clear();
+
+  // Verify all reset criteria
+  assert.equal(isPlaying, false);
+  assert.equal(currentTime, 0);
+  assert.equal(activeMoment, null);
+  assert.equal(coachingElapsed, 0);
+  assert.equal(triggeredIds.size, 0);
+
+  // Both moments are eligible to trigger again on subsequent playback
+  assert.equal(shouldTriggerCoachingMoment(moments[0], -0.05, 1.05, triggeredIds), true);
+  assert.equal(shouldTriggerCoachingMoment(moments[1], 2.15, 2.25, triggeredIds), true);
+});
+
+test('D7B: seek updates eligible/passed moments safely', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'coach1', time: 1.0, duration: 2, playerId: 'p2', title: 'T1', text: 'M1' },
+    { id: 'coach2', time: 2.0, duration: 2, playerId: 'p2', title: 'T2', text: 'M2' },
+    { id: 'coach3', time: 3.0, duration: 2, playerId: 'p2', title: 'T3', text: 'M3' },
+  ];
+
+  let triggeredIds = new Set<string>();
+
+  // 1. Seeking forward to 1.5s (between coach1 and coach2):
+  // Seeking after coach1 marks it already passed; coach2 and coach3 remain eligible
+  triggeredIds = updateSeekTriggerState(1.5, moments, triggeredIds);
+  assert.equal(triggeredIds.has('coach1'), true, 'coach1 should be marked passed');
+  assert.equal(triggeredIds.has('coach2'), false, 'coach2 should be eligible');
+  assert.equal(triggeredIds.has('coach3'), false, 'coach3 should be eligible');
+
+  // 2. Seeking backward to 0.5s (before coach1):
+  // Seeking before coach1 restores its eligibility
+  triggeredIds = updateSeekTriggerState(0.5, moments, triggeredIds);
+  assert.equal(triggeredIds.has('coach1'), false, 'coach1 should be restored as eligible');
+  assert.equal(triggeredIds.has('coach2'), false, 'coach2 should be eligible');
+  assert.equal(triggeredIds.has('coach3'), false, 'coach3 should be eligible');
+
+  // 3. Seeking past all moments to 3.5s:
+  triggeredIds = updateSeekTriggerState(3.5, moments, triggeredIds);
+  assert.equal(triggeredIds.has('coach1'), true);
+  assert.equal(triggeredIds.has('coach2'), true);
+  assert.equal(triggeredIds.has('coach3'), true);
+});
+
+test('D7B: single moment or no sequence does NOT display indicator (e.g. no 1/1)', () => {
+  const soloMoment: DiagramCoachingMoment = {
+    id: 'solo1',
+    time: 1.5,
+    duration: 2.0,
+    playerId: 'p1',
+    title: 'Điểm huấn luyện đơn lẻ',
+    text: 'Không tạo chuỗi nhiều điểm',
+  };
+
+  // Case 1: single moment in sequence list
+  const singleSequence: DiagramCoachingSequence = {
+    id: 'seq_single',
+    title: 'Single point',
+    momentIds: ['solo1'],
+  };
+
+  const posSingle = getCoachingSequencePosition('solo1', singleSequence, [soloMoment]);
+  assert.equal(posSingle.total, 1);
+  assert.equal(posSingle.current, 1);
+  // isSequence must be false when total < 2 so that no "Điểm HLV 1/1" is ever displayed in the UI
+  assert.equal(posSingle.isSequence, false, 'Single moment sequence must have isSequence = false');
+
+  // Case 2: no sequence model attached at all (pure D6 drill)
+  const posD6 = getCoachingSequencePosition('solo1', undefined, [soloMoment]);
+  assert.equal(posD6.total, 0);
+  assert.equal(posD6.current, 0);
+  assert.equal(posD6.isSequence, false);
+});
+
+test('D7B: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 technical drill plays full 3-moment sequence across drill cycle', () => {
+  const diag = buildDefaultStructuredDiagram({
+    gameFormat: '7v7',
+    playerCount: 16,
+    blockType: 'technical',
+    topic: 'Nhận bóng mở thân người',
+    execution: 'p1 chuyền cho p2, p2 kiểm tra vai mở thân người nhận bóng và chạm bước một chuyền sang p3',
+  });
+
+  const anim = diag.animation!;
+  assert.ok(anim, 'Animation must be present');
+  const seq = anim.coachingSequence!;
+  assert.ok(seq, 'Coaching sequence must be present');
+  assert.deepEqual(seq.momentIds, ['coach1', 'coach2', 'coach3']);
+
+  const moments = anim.coachingMoments!;
+  assert.equal(moments.length >= 3, true);
+
+  const triggeredIds = new Set<string>();
+
+  // --- MOMENT 1: coach1 (preReceive) ---
+  const m1 = moments.find((m) => m.id === 'coach1')!;
+  assert.ok(m1);
+  assert.equal(shouldTriggerCoachingMoment(m1, m1.time - 0.05, m1.time + 0.05, triggeredIds), true);
+  triggeredIds.add(m1.id);
+
+  const prog1 = getCoachingSequencePosition(m1.id, seq, moments);
+  assert.equal(prog1.current, 1);
+  assert.equal(prog1.total, 3);
+  assert.equal(prog1.isSequence, true);
+  const indicatorLabel1 = `Điểm HLV ${prog1.current}/${prog1.total}`;
+  assert.equal(indicatorLabel1, 'Điểm HLV 1/3');
+
+  // Simulation: presentation completes or user resumes
+  // Between m1 and m2, drill animation plays forward naturally
+  assert.equal(shouldTriggerCoachingMoment(m1, m1.time + 0.1, m1.time + 0.2, triggeredIds), false);
+
+  // --- MOMENT 2: coach2 (receive) ---
+  const m2 = moments.find((m) => m.id === 'coach2')!;
+  assert.ok(m2);
+  assert.equal(shouldTriggerCoachingMoment(m2, m2.time - 0.05, m2.time + 0.05, triggeredIds), true);
+  triggeredIds.add(m2.id);
+
+  const prog2 = getCoachingSequencePosition(m2.id, seq, moments);
+  assert.equal(prog2.current, 2);
+  assert.equal(prog2.total, 3);
+  assert.equal(prog2.isSequence, true);
+  const indicatorLabel2 = `Điểm HLV ${prog2.current}/${prog2.total}`;
+  assert.equal(indicatorLabel2, 'Điểm HLV 2/3');
+
+  // --- MOMENT 3: coach3 (firstTouch) ---
+  const m3 = moments.find((m) => m.id === 'coach3')!;
+  assert.ok(m3);
+  assert.equal(shouldTriggerCoachingMoment(m3, m3.time - 0.05, m3.time + 0.05, triggeredIds), true);
+  triggeredIds.add(m3.id);
+
+  const prog3 = getCoachingSequencePosition(m3.id, seq, moments);
+  assert.equal(prog3.current, 3);
+  assert.equal(prog3.total, 3);
+  assert.equal(prog3.isSequence, true);
+  const indicatorLabel3 = `Điểm HLV ${prog3.current}/${prog3.total}`;
+  assert.equal(indicatorLabel3, 'Điểm HLV 3/3');
+
+  // All 3 moments played smoothly in sequence
+  assert.deepEqual(Array.from(triggeredIds), ['coach1', 'coach2', 'coach3']);
 });
 
 

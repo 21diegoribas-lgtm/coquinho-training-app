@@ -14,11 +14,14 @@ import {
   calculateCameraViewBox,
   formatCoachingOverlayText,
   getCoachingPhaseState,
+  getCoachingSequenceProgress,
   getGoalGeometry,
   getTeamStyle,
   interpolateAnimationState,
   interpolateViewBox,
   resolvePathCoordinates,
+  shouldTriggerCoachingMoment,
+  updateSeekTriggerState,
 } from '../services/structuredDiagram';
 
 interface PitchDiagramProps {
@@ -122,7 +125,7 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     }
   }, [isSimulating]);
 
-  // Playback requestAnimationFrame loop with coaching moment freeze logic (TASK D5)
+  // Playback requestAnimationFrame loop with coaching moment freeze logic (TASK D5/D7B)
   useEffect(() => {
     if (!isPlaying || !effectiveAnimation || effectiveAnimation.duration <= 0) return;
     let animFrameId: number;
@@ -150,11 +153,8 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
 
           // Check if natural playback reaches any un-triggered coaching moment
           const moments = effectiveAnimation.coachingMoments || [];
-          const trigger = moments.find(
-            (m) =>
-              !triggeredMomentsRef.current.has(m.id) &&
-              m.time >= prev - 0.05 &&
-              m.time <= next + 0.05
+          const trigger = moments.find((m) =>
+            shouldTriggerCoachingMoment(m, prev, next, triggeredMomentsRef.current)
           );
 
           if (trigger) {
@@ -191,16 +191,22 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     triggeredMomentsRef.current.clear();
   };
 
+  const handleSkipCoachingMoment = () => {
+    setActiveCoachingMoment(null);
+    setCoachingElapsed(0);
+  };
+
   const handleSeek = (newTime: number) => {
-    setCurrentTime(newTime);
+    const clampedTime = Math.max(0, Math.min(effectiveAnimation?.duration ?? 0, newTime));
+    setCurrentTime(clampedTime);
     setActiveCoachingMoment(null);
     setCoachingElapsed(0);
     const moments = effectiveAnimation?.coachingMoments || [];
-    for (const m of moments) {
-      if (m.time >= newTime) {
-        triggeredMomentsRef.current.delete(m.id);
-      }
-    }
+    triggeredMomentsRef.current = updateSeekTriggerState(
+      clampedTime,
+      moments,
+      triggeredMomentsRef.current
+    );
   };
 
   // Interpolated player & ball state at currentTime; restores exact diagram positions on stop/reset
@@ -225,6 +231,18 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     if (!activeCoachingMoment) return null;
     return getCoachingPhaseState(coachingElapsed, activeCoachingMoment.duration);
   }, [activeCoachingMoment, coachingElapsed]);
+
+  // Track sequence progress for multi-action coaching sequences (TASK D7B)
+  const sequenceProgress = useMemo(() => {
+    if (!activeCoachingMoment || !effectiveAnimation) {
+      return { current: 0, total: 0, isSequence: false, momentIds: [] };
+    }
+    return getCoachingSequenceProgress(
+      activeCoachingMoment.id,
+      effectiveAnimation.coachingSequence,
+      effectiveAnimation.coachingMoments
+    );
+  }, [activeCoachingMoment, effectiveAnimation]);
 
   // Dynamic Camera Focus ViewBox during coaching moment with smooth ease-in, hold, ease-out (TASK D6)
   const cameraViewBox = useMemo(() => {
@@ -709,24 +727,29 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
           </g>
         </svg>
 
-        {/* Coaching Text Overlay Card (TASK D5/D6) */}
+        {/* Coaching Text Overlay Card (TASK D5/D6/D7B) */}
         {activeCoachingMoment && phaseState && phaseState.textOpacity > 0 && (
           <div
             style={{ opacity: phaseState.textOpacity }}
             className="absolute top-2.5 sm:top-3 left-1/2 -translate-x-1/2 z-20 w-[92%] max-w-sm sm:max-w-md rounded-lg bg-stone-900/95 p-2.5 sm:p-3 text-white shadow-xl backdrop-blur-md border border-amber-400/70 pointer-events-auto transition-opacity duration-150"
           >
             <div className="flex items-center justify-between gap-2 mb-1">
-              <div className="flex items-center gap-1.5 text-amber-400 font-bold text-xs uppercase tracking-wider truncate">
-                <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />
+              <div className="flex items-center gap-1.5 text-amber-400 font-bold text-xs uppercase tracking-wider truncate min-w-0">
+                <span className="inline-block h-2 w-2 rounded-full bg-amber-400 shrink-0" />
                 <span className="truncate">Điểm huấn luyện: {formatCoachingOverlayText(activeCoachingMoment.title, 40)}</span>
+                {sequenceProgress.isSequence && (
+                  <span
+                    data-testid="coaching-sequence-indicator"
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold text-amber-300 bg-amber-400/20 border border-amber-400/30 whitespace-nowrap shrink-0"
+                  >
+                    Điểm HLV {sequenceProgress.current}/{sequenceProgress.total}
+                  </span>
+                )}
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  setActiveCoachingMoment(null);
-                  setCoachingElapsed(0);
-                }}
-                className="text-[10px] text-stone-300 hover:text-white px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 transition-all font-medium whitespace-nowrap cursor-pointer"
+                onClick={handleSkipCoachingMoment}
+                className="text-[10px] text-stone-300 hover:text-white px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 transition-all font-medium whitespace-nowrap cursor-pointer shrink-0"
                 title="Bỏ qua phần giải thích và tiếp tục bài tập"
               >
                 Tiếp tục ({Math.max(0, activeCoachingMoment.duration - coachingElapsed).toFixed(1)}s)
