@@ -18,6 +18,7 @@ import {
   getCoachingSequenceProgress,
   getEffectiveCoachingDuration,
   getGoalGeometry,
+  getRepresentationDisplayLabel,
   getSequenceTimelineMarkers,
   getTeamStyle,
   interpolateAnimationState,
@@ -123,6 +124,12 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     }
     return buildSemanticAnimation(diagram);
   }, [diagram]);
+
+  // Representative Group Display Label (TASK REP-B)
+  const repLabel = useMemo(
+    () => getRepresentationDisplayLabel(diagram.representation),
+    [diagram.representation]
+  );
 
   const [isPlaying, setIsPlaying] = useState<boolean>(Boolean(isSimulating));
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -828,6 +835,24 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
             })}
           </g>
         </svg>
+
+        {/* Representative Group Badge Overlay (TASK REP-B) */}
+        {repLabel && (
+          <div
+            data-testid="representative-group-badge"
+            className="absolute top-2 right-2 sm:top-2.5 sm:right-2.5 z-10 pointer-events-none flex flex-col items-end gap-0.5 rounded bg-stone-900/85 backdrop-blur-xs px-2 py-1 border border-white/20 text-right shadow-sm select-none"
+          >
+            <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-semibold text-emerald-300 tracking-tight leading-none">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+              <span>{repLabel.primary}</span>
+            </div>
+            {repLabel.secondary && (
+              <span className="text-[9px] sm:text-[10px] text-white/75 font-normal leading-tight">
+                {repLabel.secondary}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Coaching Text Overlay Card (TASK D5/D6/D7B) */}
         {activeCoachingMoment && phaseState && phaseState.textOpacity > 0 && (

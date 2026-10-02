@@ -4,6 +4,7 @@ import {
   applyPlayerSpacingSafety,
   buildCoachingSequence,
   buildDefaultStructuredDiagram,
+  buildRepresentativePairDiagram,
   buildSemanticAnimation,
   buildSemanticCoachingMoments,
   buildWavyPath,
@@ -53,6 +54,7 @@ import {
   safeStructuredDiagram,
   sanitizeCoachingSequence,
   shouldTriggerCoachingMoment,
+  shouldUseRepresentativeGroup,
   updateSeekTriggerState,
   validateDiagramAnimation,
   validateGroupedDiagram,
@@ -68,6 +70,7 @@ import {
   DiagramCoachingMoment,
   DiagramCoachingSequence,
   DiagramPlayer,
+  DiagramRepresentation,
   SemanticCoachingEvent,
   StructuredDrillDiagram,
 } from '../src/types/session';
@@ -3389,6 +3392,479 @@ test('FIX-B TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7
     assert.ok(playerIds.has(`p${i}`), `Point 10: Player p${i} must exist in diagram`);
   }
 });
+
+// =============================================================================
+// TASK REP-A: REPRESENTATIVE-GROUP DIAGRAM DATA MODEL & TESTS
+// =============================================================================
+
+test('REP-A: shouldUseRepresentativeGroup returns true for unopposed repeated independent group drills', () => {
+  // 1. 16 players, 8 groups of 2, warm-up passing drill
+  const pairDrill = {
+    blockType: 'warm_up' as const,
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' as const },
+    organization: '16 cầu thủ chia thành 8 nhóm 2 thực hiện đồng thời',
+    execution: 'Hai cầu thủ chuyền bóng qua lại theo cự ly 10m, kiểm tra vai và mở thân người.',
+    topic: 'Nhận bóng mở thân người',
+  };
+  assert.equal(shouldUseRepresentativeGroup(pairDrill), true);
+
+  // 2. 12 players, 6 groups of 2, technical passing drill
+  const techPairs = {
+    blockType: 'technical' as const,
+    playerCount: 12,
+    playerOrganization: { groups: 6, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' as const },
+    organization: '6 cặp chuyền bóng độc lập',
+    execution: 'Chuyền và nhận bóng định hướng.',
+  };
+  assert.equal(shouldUseRepresentativeGroup(techPairs), true);
+
+  // 3. 16 players, 4 groups of 4, unopposed repeated technical stations
+  const quadStations = {
+    blockType: 'technical' as const,
+    playerCount: 16,
+    playerOrganization: { groups: 4, playersPerGroup: 4, leftover: 0, leftoverRole: 'none' as const },
+    organization: '4 trạm kỹ thuật độc lập không đối kháng',
+    execution: 'Phối hợp hình kim cương tại mỗi trạm.',
+  };
+  assert.equal(shouldUseRepresentativeGroup(quadStations), true);
+});
+
+test('REP-A: shouldUseRepresentativeGroup returns false for opposed, small-sided, match, rondo, possession, or interacting groups', () => {
+  // 1. Match
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'match',
+      playerCount: 16,
+      playerOrganization: { groups: 2, playersPerGroup: 8, leftover: 0, leftoverRole: 'none' },
+      organization: 'Thi đấu 8v8 toàn sân',
+    }),
+    false
+  );
+
+  // 2. Small-sided game
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'small_sided',
+      playerCount: 16,
+      playerOrganization: { groups: 2, playersPerGroup: 8, leftover: 0, leftoverRole: 'none' },
+      organization: 'Trò chơi đối kháng 8v8 với 4 khung thành nhỏ',
+    }),
+    false
+  );
+
+  // 3. Conditioned game
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'technical',
+      playerCount: 16,
+      playerOrganization: { groups: 4, playersPerGroup: 4, leftover: 0, leftoverRole: 'none' },
+      organization: 'Trò chơi điều kiện có tranh cướp bóng giữa 2 đội',
+    }),
+    false
+  );
+
+  // 4. Opposed drills (defenders, pressure)
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'skill',
+      playerCount: 16,
+      playerOrganization: { groups: 4, playersPerGroup: 4, leftover: 0, leftoverRole: 'none' },
+      organization: '4 nhóm có hậu vệ áp sát tranh cướp bóng',
+    }),
+    false
+  );
+
+  // 5. Rondo with interacting roles
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'technical',
+      playerCount: 16,
+      playerOrganization: { groups: 4, playersPerGroup: 4, leftover: 0, leftoverRole: 'none' },
+      organization: 'Rondo 3v1 tại 4 ô',
+    }),
+    false
+  );
+
+  // 6. Possession games
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'skill',
+      playerCount: 16,
+      playerOrganization: { groups: 2, playersPerGroup: 8, leftover: 0, leftoverRole: 'none' },
+      organization: 'Chơi kiểm soát bóng possession 8v8',
+    }),
+    false
+  );
+
+  // 7. Exercises where groups interact
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'technical',
+      playerCount: 16,
+      playerOrganization: { groups: 4, playersPerGroup: 4, leftover: 0, leftoverRole: 'none' },
+      organization: 'Các nhóm luân phiên chuyển sang nhóm khác và xoay vòng giữa các trạm',
+    }),
+    false
+  );
+
+  // 8. Single group (groups <= 1)
+  assert.equal(
+    shouldUseRepresentativeGroup({
+      blockType: 'technical',
+      playerCount: 16,
+      playerOrganization: { groups: 1, playersPerGroup: 16, leftover: 0, leftoverRole: 'none' },
+      organization: 'Toàn đội tập chung một nhóm lớn',
+    }),
+    false
+  );
+
+  // 9. Undefined options or playerOrganization
+  assert.equal(shouldUseRepresentativeGroup(undefined), false);
+  assert.equal(shouldUseRepresentativeGroup({ blockType: 'technical', playerCount: 16 }), false);
+});
+
+test('REP-A: representation metadata shape and content conforms to specification', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  assert.ok(diag.representation);
+  assert.equal(diag.representation.mode, 'representative-group');
+  assert.equal(diag.representation.totalGroups, 8);
+  assert.equal(diag.representation.playersPerGroup, 2);
+  assert.equal(diag.representation.representedGroups, 1);
+  assert.equal(diag.representation.label, '8 cặp thực hiện đồng thời');
+
+  // Technical validation accepts representation metadata
+  const techRes = validateStructuredDiagram(diag, 16);
+  assert.equal(techRes.ok, true, `validateStructuredDiagram should pass: ${techRes.errors.join(', ')}`);
+});
+
+test('REP-A: player accounting and exercise data remain completely real', () => {
+  const realPlayerCount = 16;
+  const realPlayerOrg = { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' as const };
+  const realPlayersCountStr = '16 Cầu thủ (8 nhóm 2)';
+
+  const diag = buildRepresentativePairDiagram(realPlayerCount, {
+    blockType: 'warm_up',
+    playerCount: realPlayerCount,
+    playerOrganization: realPlayerOrg,
+    organization: `${realPlayersCountStr} thực hiện chuyền đôi`,
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  // Diagram visual representation has 2 players
+  assert.equal(diag.players.length, 2);
+  // Real exercise accounting is untouched
+  assert.equal(realPlayerCount, 16);
+  assert.equal(realPlayerOrg.groups * realPlayerOrg.playersPerGroup + realPlayerOrg.leftover, 16);
+  assert.equal(diag.playerOrganization?.groups, 8);
+  assert.equal(diag.playerOrganization?.playersPerGroup, 2);
+});
+
+test('REP-A: semantic validation validates representative mode and rejects contradictions', () => {
+  const validRepDiag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  // 1. Valid representative diagram passes semantic validation
+  const validRes = validateSemanticDiagram(validRepDiag, {
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    blockType: 'warm_up',
+  });
+  assert.equal(validRes.ok, true, `Valid representative diagram must pass: ${validRes.errors.join(', ')}`);
+
+  // 2. Contradiction: diagram players count does not match represented players (e.g. 3 players instead of 2)
+  const badCountDiag = structuredClone(validRepDiag);
+  badCountDiag.players.push({ id: 'p3', team: 'blue', role: 'support', x: 50, y: 50 });
+  const badCountRes = validateSemanticDiagram(badCountDiag, {
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    blockType: 'warm_up',
+  });
+  assert.equal(badCountRes.ok, false);
+  assert.ok(badCountRes.errors.some((e) => e.includes('does not match represented players')));
+
+  // 3. Contradiction: representation metadata does not match exercise player count
+  const badMetaDiag = structuredClone(validRepDiag);
+  badMetaDiag.representation!.totalGroups = 6; // 6 * 2 = 12 != 16
+  const badMetaRes = validateSemanticDiagram(badMetaDiag, {
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    blockType: 'warm_up',
+  });
+  assert.equal(badMetaRes.ok, false);
+  assert.ok(badMetaRes.errors.some((e) => e.includes('does not match exercise player count')));
+
+  // 4. Contradiction: artificial red opponents in unopposed representative drill
+  const redOppDiag = structuredClone(validRepDiag);
+  redOppDiag.players[1].team = 'red';
+  const redOppRes = validateSemanticDiagram(redOppDiag, {
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2 không đối kháng',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    blockType: 'warm_up',
+  });
+  assert.equal(redOppRes.ok, false);
+  assert.ok(redOppRes.errors.some((e) => e.includes('artificial opposing red players')));
+});
+
+test('REP-A: representative animation references only local players/balls (p1, p2, b1) without p3-p16', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+    execution: 'p1 chuyền cho p2, p2 mở thân người nhận bóng bằng chân xa và chuyền lại.',
+  });
+
+  const anim = diag.animation;
+  assert.ok(anim, 'Animation must exist');
+  assert.ok(anim.steps.length >= 1, 'Animation must contain steps');
+
+  // Verify all actions reference only p1, p2, and b1
+  const allowedPlayers = new Set(['p1', 'p2']);
+  const allowedBalls = new Set(['b1']);
+
+  anim.steps.forEach((step) => {
+    step.actions.forEach((act) => {
+      if (act.type === 'ballPass') {
+        assert.ok(allowedBalls.has(act.ballId), `ballPass ballId '${act.ballId}' must be local ball`);
+        assert.ok(allowedPlayers.has(act.fromPlayerId), `ballPass fromPlayerId '${act.fromPlayerId}' must be p1 or p2`);
+        assert.ok(allowedPlayers.has(act.toPlayerId), `ballPass toPlayerId '${act.toPlayerId}' must be p1 or p2`);
+      } else if (act.type === 'playerMove') {
+        assert.ok(allowedPlayers.has(act.playerId), `playerMove playerId '${act.playerId}' must be p1 or p2`);
+      } else if (act.type === 'ballDribble') {
+        assert.ok(allowedPlayers.has(act.playerId), `ballDribble playerId '${act.playerId}' must be p1 or p2`);
+        assert.ok(allowedBalls.has(act.ballId), `ballDribble ballId '${act.ballId}' must be local ball`);
+      }
+    });
+  });
+
+  // Verify coaching moments reference only p1 or p2
+  if (anim.coachingMoments) {
+    anim.coachingMoments.forEach((cm) => {
+      assert.ok(allowedPlayers.has(cm.playerId), `coaching moment playerId '${cm.playerId}' must be p1 or p2`);
+    });
+  }
+
+  // Animation passes validation
+  const animVal = validateDiagramAnimation(anim, diag.players, diag.balls);
+  assert.equal(animVal.ok, true, `validateDiagramAnimation must pass: ${animVal.errors.join(', ')}`);
+});
+
+test('REP-A: safeStructuredDiagram preserves representation metadata and recovers cleanly', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  // 1. Preserves representation metadata on valid diagram
+  const sanitized = safeStructuredDiagram(diag, 16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  assert.ok(sanitized.representation);
+  assert.equal(sanitized.representation.mode, 'representative-group');
+  assert.equal(sanitized.representation.totalGroups, 8);
+  assert.equal(sanitized.representation.playersPerGroup, 2);
+  assert.equal(sanitized.players.length, 2);
+
+  // 2. Recovery on malformed diagram preserves representative mode
+  const corruptDiag = structuredClone(diag);
+  corruptDiag.players[0].x = 999; // Corrupt coordinate
+  const recovered = safeStructuredDiagram(corruptDiag, 16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+    representationMode: 'representative-group',
+  });
+
+  assert.ok(recovered.representation);
+  assert.equal(recovered.representation.mode, 'representative-group');
+  assert.equal(recovered.players.length, 2);
+  assert.equal(recovered.players[0].x, 32);
+});
+
+// =============================================================================
+// SECTION 8 SPECIFICATION TEST CASE:
+// 16 players, Nhận bóng mở thân người, 90 minutes, 7v7, 8 groups of 2, unopposed repeated pair drill
+// =============================================================================
+
+test('REP-A TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7, 8 groups of 2 unopposed repeated pair drill', () => {
+  const options = {
+    blockType: 'warm_up' as const,
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' as const },
+    exerciseName: 'Khởi động chuyền bóng mở thân người theo cặp',
+    topic: 'Nhận bóng mở thân người',
+    organization: '16 cầu thủ chia thành 8 nhóm 2 thực hiện đồng thời bài tập chuyền bóng không đối kháng',
+    execution: 'p1 chuyền cho p2, p2 kiểm tra vai, mở thân người nhận bóng bằng chân xa và chuyền trả lại.',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    area: '20 x 20 m',
+    gameFormat: '7v7' as const,
+    representationMode: 'representative-group' as const,
+  };
+
+  const diag = buildDefaultStructuredDiagram(options);
+
+  // 1. real playerCount remains 16
+  assert.equal(options.playerCount, 16, '1. Real playerCount must remain 16');
+
+  // 2. playerOrganization remains 8 groups of 2
+  assert.equal(options.playerOrganization.groups, 8, '2. playerOrganization.groups must be 8');
+  assert.equal(options.playerOrganization.playersPerGroup, 2, '2. playerOrganization.playersPerGroup must be 2');
+  assert.equal(options.playerOrganization.groups * options.playerOrganization.playersPerGroup + options.playerOrganization.leftover, 16, '2. Total accounted players must be 16');
+
+  // 3. representation.mode = representative-group
+  assert.ok(diag.representation, '3. Representation metadata must exist');
+  assert.equal(diag.representation.mode, 'representative-group', '3. representation.mode must be representative-group');
+
+  // 4. totalGroups = 8
+  assert.equal(diag.representation.totalGroups, 8, '4. totalGroups must be 8');
+
+  // 5. playersPerGroup = 2
+  assert.equal(diag.representation.playersPerGroup, 2, '5. playersPerGroup must be 2');
+
+  // 6. diagram.players.length = 2
+  assert.equal(diag.players.length, 2, '6. diagram.players.length must be 2');
+  assert.deepEqual(diag.players.map((p) => p.id), ['p1', 'p2'], '6. Diagram players must be p1 and p2');
+
+  // 7. diagram.balls.length = 1
+  assert.equal(diag.balls.length, 1, '7. diagram.balls.length must be 1');
+  assert.equal(diag.balls[0].id, 'b1', '7. Diagram ball must be b1');
+
+  // 8. no paths reference p3-p16
+  const allowedPlayerIds = new Set(['p1', 'p2']);
+  diag.paths.forEach((path) => {
+    assert.ok(allowedPlayerIds.has(path.fromPlayerId), `8. path fromPlayerId '${path.fromPlayerId}' must not reference p3-p16`);
+    if (path.toPlayerId) {
+      assert.ok(allowedPlayerIds.has(path.toPlayerId), `8. path toPlayerId '${path.toPlayerId}' must not reference p3-p16`);
+    }
+  });
+
+  // 9. animation references only p1/p2 and local ball
+  assert.ok(diag.animation, '9. Animation must exist');
+  diag.animation.steps.forEach((step) => {
+    step.actions.forEach((act) => {
+      if (act.type === 'ballPass') {
+        assert.ok(allowedPlayerIds.has(act.fromPlayerId), `9. ballPass from '${act.fromPlayerId}' must be p1 or p2`);
+        assert.ok(allowedPlayerIds.has(act.toPlayerId), `9. ballPass to '${act.toPlayerId}' must be p1 or p2`);
+        assert.equal(act.ballId, 'b1', `9. ballPass ballId '${act.ballId}' must be b1`);
+      } else if (act.type === 'playerMove') {
+        assert.ok(allowedPlayerIds.has(act.playerId), `9. playerMove '${act.playerId}' must be p1 or p2`);
+      } else if (act.type === 'ballDribble') {
+        assert.ok(allowedPlayerIds.has(act.playerId), `9. ballDribble '${act.playerId}' must be p1 or p2`);
+        assert.equal(act.ballId, 'b1', `9. ballDribble ballId '${act.ballId}' must be b1`);
+      }
+    });
+  });
+
+  // 10. semantic validation PASS
+  const semRes = validateSemanticDiagram(diag, {
+    playerCount: 16,
+    playerOrganization: options.playerOrganization,
+    equipment: options.equipment,
+    organization: options.organization,
+    execution: options.execution,
+    blockType: options.blockType,
+  });
+  assert.equal(semRes.ok, true, `10. Semantic validation must PASS: ${semRes.errors.join(', ')}`);
+});
+
+// =============================================================================
+// SECTION 9: FULL-MODE REGRESSION
+// =============================================================================
+
+test('REP-A REGRESSION: full diagrams remain unchanged for opposed technical, rondo, small-sided, conditioned, match, and full pairs', () => {
+  // 1. Opposed technical drill
+  const opposedTech = buildDefaultStructuredDiagram({
+    blockType: 'technical',
+    playerCount: 16,
+    playerOrganization: { groups: 4, playersPerGroup: 4, leftover: 0, leftoverRole: 'none' },
+    organization: '4 nhóm 4 có hậu vệ phòng ngự áp sát',
+    topic: 'Nhận bóng mở thân người',
+  });
+  assert.equal(opposedTech.players.length, 16, 'Opposed technical drill must retain full 16 players');
+  assert.equal(opposedTech.representation, undefined, 'Opposed technical drill must not use representative mode');
+
+  // 2. Rondo / possession (Skill)
+  const rondoSkill = buildDefaultStructuredDiagram({
+    blockType: 'skill',
+    playerCount: 16,
+    playerOrganization: { groups: 2, playersPerGroup: 8, leftover: 0, leftoverRole: 'none' },
+    organization: 'Chơi rondo đối kháng 8v8',
+    topic: 'Nhận bóng mở thân người',
+  });
+  assert.equal(rondoSkill.players.length, 16, 'Rondo/possession must retain full 16 players');
+  assert.equal(rondoSkill.representation, undefined);
+
+  // 3. Small-sided game
+  const ssg = buildDefaultStructuredDiagram({
+    blockType: 'small_sided',
+    playerCount: 16,
+    playerOrganization: { groups: 2, playersPerGroup: 8, leftover: 0, leftoverRole: 'none' },
+    organization: 'Trò chơi đối kháng 8v8 4 khung thành nhỏ',
+    equipment: ['4 Khung thành nhỏ', '10 Quả bóng'],
+    topic: 'Nhận bóng mở thân người',
+  });
+  assert.equal(ssg.players.length, 16, 'Small-sided game must retain full 16 players');
+  assert.equal(ssg.goals.length, 4, 'Small-sided game must retain 4 mini goals');
+  assert.equal(ssg.representation, undefined);
+
+  // 4. Match
+  const match = buildDefaultStructuredDiagram({
+    blockType: 'match',
+    playerCount: 16,
+    playerOrganization: { groups: 2, playersPerGroup: 8, leftover: 0, leftoverRole: 'none' },
+    organization: 'Thi đấu 8v8 có 2 thủ môn',
+    topic: 'Nhận bóng mở thân người',
+  });
+  assert.equal(match.players.length, 16, 'Match must retain full 16 players');
+  assert.equal(match.goals.length, 2, 'Match must retain 2 standard goals');
+  assert.equal(match.representation, undefined);
+
+  // 5. Full pair drill (when representationMode is 'full' or default)
+  const fullPairs = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+    representationMode: 'full',
+  });
+  assert.equal(fullPairs.players.length, 16, 'Full pairs mode must retain full 16 players');
+  assert.equal(clusterDiagramPlayers(fullPairs.players, 18).length, 8, 'Full pairs must show 8 pairs');
+});
+
 
 
 

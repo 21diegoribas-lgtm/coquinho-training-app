@@ -20,6 +20,7 @@ import {
   DiagramPath,
   DiagramPitch,
   DiagramPlayer,
+  DiagramRepresentation,
   DiagramTeam,
   DiagramZone,
   ExercisePlayerOrganization,
@@ -223,6 +224,30 @@ export function validateStructuredDiagram(
     const animRes = validateDiagramAnimation(d.animation, seenPlayerIds, seenBallIds);
     if (!animRes.ok) {
       errors.push(...animRes.errors);
+    }
+  }
+
+  // 9. Representation (optional foundation REP-A)
+  if (d.representation !== undefined) {
+    if (!d.representation || typeof d.representation !== 'object') {
+      errors.push('Diagram representation must be a non-null object');
+    } else {
+      const rep = d.representation as Record<string, unknown>;
+      if (rep.mode !== 'full' && rep.mode !== 'representative-group') {
+        errors.push(`Diagram representation mode must be 'full' or 'representative-group', got '${String(rep.mode)}'`);
+      }
+      if (typeof rep.totalGroups !== 'number' || !Number.isInteger(rep.totalGroups) || rep.totalGroups <= 0) {
+        errors.push('Diagram representation totalGroups must be a positive integer');
+      }
+      if (typeof rep.playersPerGroup !== 'number' || !Number.isInteger(rep.playersPerGroup) || rep.playersPerGroup <= 0) {
+        errors.push('Diagram representation playersPerGroup must be a positive integer');
+      }
+      if (typeof rep.representedGroups !== 'number' || !Number.isInteger(rep.representedGroups) || rep.representedGroups <= 0) {
+        errors.push('Diagram representation representedGroups must be a positive integer');
+      }
+      if (rep.label !== undefined && typeof rep.label !== 'string') {
+        errors.push('Diagram representation label must be a string');
+      }
     }
   }
 
@@ -2684,6 +2709,24 @@ export function buildSemanticAnimation(
             ],
           });
           currentTime += stepDuration;
+
+          // For 2-player representative pair with single pass path, add return pass for complete cycle
+          if (players.length === 2 && paths.length === 1) {
+            steps.push({
+              id: `step-${idx + 2}-return-pass`,
+              start: currentTime,
+              duration: stepDuration,
+              actions: [
+                {
+                  type: 'ballPass',
+                  ballId: primaryBall.id,
+                  fromPlayerId: toP.id,
+                  toPlayerId: fromP.id,
+                },
+              ],
+            });
+            currentTime += stepDuration;
+          }
         } else if (p.type === 'movement' && fromP) {
           const targetX = toP
             ? Math.round(toP.x + (toP.x > fromP.x ? -6 : 6))
@@ -2786,6 +2829,8 @@ export interface BuildDiagramOptions {
   equipment?: string[];
   area?: string;
   gameFormat?: GameFormat;
+  representationMode?: 'full' | 'representative-group';
+  preferRepresentative?: boolean;
 }
 
 export interface SemanticValidationOptions {
@@ -2795,6 +2840,99 @@ export interface SemanticValidationOptions {
   organization?: string;
   execution?: string;
   blockType?: BlockType;
+  representation?: DiagramRepresentation;
+}
+
+export interface RepresentativeGroupOptions {
+  blockType?: BlockType;
+  playerCount?: number;
+  playerOrganization?: ExercisePlayerOrganization;
+  organization?: string;
+  execution?: string;
+  topic?: string;
+  exerciseName?: string;
+  equipment?: string[];
+  area?: string;
+  gameFormat?: GameFormat;
+}
+
+/**
+ * Pure helper to detect whether an exercise should use a representative-group diagram (TASK REP-A).
+ * Returns true only when:
+ * - playerOrganization.groups > 1
+ * - groups are independent/repeated
+ * - no opposition between groups
+ * - no inter-group interaction
+ * - drill is technical/unopposed/repeated-station style
+ * 
+ * Returns false for:
+ * - small-sided games
+ * - conditioned games
+ * - match
+ * - opposed drills
+ * - rondos with interacting roles
+ * - possession games
+ * - exercises where groups interact
+ */
+export function shouldUseRepresentativeGroup(options?: RepresentativeGroupOptions): boolean {
+  if (!options) return false;
+  const pOrg = options.playerOrganization;
+  if (!pOrg || typeof pOrg.groups !== 'number' || pOrg.groups <= 1) {
+    return false;
+  }
+  if (typeof pOrg.playersPerGroup !== 'number' || pOrg.playersPerGroup < 1) {
+    return false;
+  }
+
+  const blockType = options.blockType;
+  // Return false for match and small-sided games
+  if (blockType === 'match' || blockType === 'small_sided') {
+    return false;
+  }
+
+  // Return false for opposed drills
+  if (isOpposedExercise(blockType || 'technical', options.organization, options.execution, pOrg)) {
+    return false;
+  }
+
+  const text = [
+    options.organization || '',
+    options.execution || '',
+    options.exerciseName || '',
+    options.topic || '',
+  ].join(' ').toLowerCase();
+
+  const isExplicitlyUnopposed = /không đối kháng|unopposed|không có hậu vệ|không người kèm/i.test(text);
+  const textWithoutUnopposed = text.replace(/không đối kháng|không có hậu vệ|không người kèm|unopposed/gi, '');
+
+  // Return false for small-sided games, conditioned games, match
+  if (/small-sided|small sided|conditioned game|trò chơi nhỏ|trò chơi điều kiện|trận đấu|thi đấu \d+v\d+/i.test(text)) {
+    return false;
+  }
+
+  // Return false for opposed drills, defenders, rondos with interacting roles, possession games
+  if (!isExplicitlyUnopposed && /đối kháng|hậu vệ|defender|presser|áp sát|cướp bóng|đoạt bóng|tranh bóng|tranh cướp|rondo|possession|kiểm soát bóng|chia 2 đội/i.test(textWithoutUnopposed)) {
+    return false;
+  }
+  if (isExplicitlyUnopposed && /rondo|possession|chia 2 đội/i.test(textWithoutUnopposed)) {
+    return false;
+  }
+
+  // Return false for exercises where groups interact (e.g. inter-station passing or rotating together)
+  if (/chuyển sang nhóm khác|đổi nhóm|nhóm này chuyền cho nhóm khác|hai nhóm phối hợp|các nhóm tương tác|đấu giữa các nhóm|xoay vòng giữa các trạm/i.test(text)) {
+    return false;
+  }
+
+  // Drill is technical/unopposed/repeated-station style
+  if (blockType === 'warm_up' || blockType === 'technical' || !blockType) {
+    return true;
+  }
+
+  if (blockType === 'skill' && !isOpposedExercise('skill', options.organization, options.execution, pOrg)) {
+    return true;
+  }
+
+  return false;
 }
 
 export interface DetectedEquipmentGoals {
@@ -2999,35 +3137,89 @@ export function validateSemanticDiagram(
   const paths = Array.isArray(diagram.paths) ? diagram.paths : [];
 
   // 1. Total player count vs exercise allocation
-  const expectedTotal = options.playerCount;
-  if (players.length !== expectedTotal) {
-    errors.push(
-      `Diagram player count (${players.length}) does not match exercise player allocation (${expectedTotal})`
-    );
+  const rep = diagram.representation || options.representation;
+  const isRepGroup = rep?.mode === 'representative-group';
+
+  if (isRepGroup) {
+    if (!rep || typeof rep !== 'object') {
+      errors.push('Representative diagram missing representation metadata');
+    } else {
+      if (typeof rep.totalGroups !== 'number' || rep.totalGroups <= 1) {
+        errors.push(`Representative diagram totalGroups must be > 1 (got ${rep.totalGroups})`);
+      }
+      if (typeof rep.playersPerGroup !== 'number' || rep.playersPerGroup < 1) {
+        errors.push(`Representative diagram playersPerGroup must be positive (got ${rep.playersPerGroup})`);
+      }
+      const represented = rep.representedGroups || 1;
+      const expectedCount = rep.playersPerGroup * represented;
+      if (players.length !== expectedCount) {
+        errors.push(
+          `Representative diagram player count (${players.length}) does not match represented players (${expectedCount} for ${represented} group(s) of ${rep.playersPerGroup})`
+        );
+      }
+      const leftover = options.playerOrganization?.leftover ?? 0;
+      if (typeof rep.totalGroups === 'number' && typeof rep.playersPerGroup === 'number') {
+        const accounted = rep.totalGroups * rep.playersPerGroup + leftover;
+        if (accounted !== options.playerCount) {
+          errors.push(
+            `Representative metadata (${rep.totalGroups} groups * ${rep.playersPerGroup} players + ${leftover} leftover = ${accounted}) does not match exercise player count (${options.playerCount})`
+          );
+        }
+      }
+      if (options.playerOrganization) {
+        if (rep.totalGroups !== options.playerOrganization.groups) {
+          errors.push(
+            `Representative totalGroups (${rep.totalGroups}) does not match exercise playerOrganization.groups (${options.playerOrganization.groups})`
+          );
+        }
+        if (rep.playersPerGroup !== options.playerOrganization.playersPerGroup) {
+          errors.push(
+            `Representative playersPerGroup (${rep.playersPerGroup}) does not match exercise playerOrganization.playersPerGroup (${options.playerOrganization.playersPerGroup})`
+          );
+        }
+      }
+    }
+  } else {
+    // Mode is 'full': diagram.players.length must still match full player allocation
+    const expectedTotal = options.playerCount;
+    if (players.length !== expectedTotal) {
+      errors.push(
+        `Diagram player count (${players.length}) does not match exercise player allocation (${expectedTotal})`
+      );
+    }
   }
 
   // 2. Player grouping consistency
   const pOrg = options.playerOrganization;
   if (pOrg && pOrg.groups > 0 && pOrg.playersPerGroup > 0) {
-    if (pOrg.groups === 8 && pOrg.playersPerGroup === 2) {
-      const clusters = clusterDiagramPlayers(players, 18);
-      if (clusters.length !== 8 || clusters.some((c) => c.length !== 2)) {
-        errors.push(
-          `Drill organization specifies 8 groups of 2, but diagram does not show 8 distinct pairs (found ${clusters.length} clusters)`
-        );
+    if (isRepGroup) {
+      if (players.length === pOrg.playersPerGroup && pOrg.playersPerGroup === 2) {
+        const clusters = clusterDiagramPlayers(players, 50);
+        if (clusters.length !== 1 || clusters[0].length !== 2) {
+          errors.push('Representative pair diagram must show exactly 1 pair');
+        }
       }
-    } else if (pOrg.groups === 4 && pOrg.playersPerGroup === 4) {
-      const clusters = clusterDiagramPlayers(players, 20);
-      if (clusters.length !== 4 || clusters.some((c) => c.length !== 4)) {
-        errors.push(
-          `Drill organization specifies 4 groups of 4, but diagram does not show 4 distinct groups (found ${clusters.length} clusters)`
-        );
-      }
-    } else if (pOrg.groups === 2 && (options.blockType === 'match' || options.blockType === 'small_sided')) {
-      const blueTeam = players.filter((p) => p.team === 'blue');
-      const redTeam = players.filter((p) => p.team === 'red');
-      if (blueTeam.length === 0 || redTeam.length === 0) {
-        errors.push('Opposed drill diagram must separate players into two distinct teams');
+    } else {
+      if (pOrg.groups === 8 && pOrg.playersPerGroup === 2) {
+        const clusters = clusterDiagramPlayers(players, 18);
+        if (clusters.length !== 8 || clusters.some((c) => c.length !== 2)) {
+          errors.push(
+            `Drill organization specifies 8 groups of 2, but diagram does not show 8 distinct pairs (found ${clusters.length} clusters)`
+          );
+        }
+      } else if (pOrg.groups === 4 && pOrg.playersPerGroup === 4) {
+        const clusters = clusterDiagramPlayers(players, 20);
+        if (clusters.length !== 4 || clusters.some((c) => c.length !== 4)) {
+          errors.push(
+            `Drill organization specifies 4 groups of 4, but diagram does not show 4 distinct groups (found ${clusters.length} clusters)`
+          );
+        }
+      } else if (pOrg.groups === 2 && (options.blockType === 'match' || options.blockType === 'small_sided')) {
+        const blueTeam = players.filter((p) => p.team === 'blue');
+        const redTeam = players.filter((p) => p.team === 'red');
+        if (blueTeam.length === 0 || redTeam.length === 0) {
+          errors.push('Opposed drill diagram must separate players into two distinct teams');
+        }
       }
     }
   }
@@ -3093,6 +3285,132 @@ export function validateSemanticDiagram(
   }
 
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Builds a single representative pair diagram for repeated independent pair drills (TASK REP-A).
+ * Contains only:
+ * - 2 representative players (p1, p2)
+ * - 1 local ball (b1)
+ * - local cones (c1, c2)
+ * - local path (p1 -> p2)
+ * - representation metadata
+ * - animation for that representative pair only
+ */
+export function buildRepresentativePairDiagram(
+  count: number,
+  options: BuildDiagramOptions
+): StructuredDrillDiagram {
+  const pitch: DiagramPitch = { width: 100, height: 60 };
+  const pOrg = options.playerOrganization;
+  const totalGroups = pOrg?.groups ?? Math.floor(count / 2);
+  const playersPerGroup = pOrg?.playersPerGroup ?? 2;
+
+  // Place the representative pair centrally and clearly
+  const players: DiagramPlayer[] = [
+    { id: 'p1', team: 'blue', role: 'passer', x: 32, y: 30 },
+    { id: 'p2', team: 'blue', role: 'receiver', x: 68, y: 30 },
+  ];
+
+  const balls: DiagramBall[] = [
+    { id: 'b1', x: 36, y: 30 },
+  ];
+
+  const cones: DiagramCone[] = [
+    { id: 'c1', x: 50, y: 22 },
+    { id: 'c2', x: 50, y: 38 },
+  ];
+
+  const goals: DiagramGoal[] = [];
+  const zones: DiagramZone[] = [];
+  const paths: DiagramPath[] = [
+    { id: 'path1', type: 'pass', fromPlayerId: 'p1', toPlayerId: 'p2' },
+  ];
+
+  const eqGoals = detectEquipmentGoals(options.equipment, options.organization, options.execution);
+  if (eqGoals.hasGoals && eqGoals.isMini) {
+    for (let i = 0; i < Math.min(2, eqGoals.miniGoals); i++) {
+      goals.push({
+        id: `g${i + 1}`,
+        type: 'mini',
+        x: i === 0 ? 10 : 90,
+        y: 30,
+        orientation: i === 0 ? 'left' : 'right',
+      });
+    }
+  }
+
+  const representation: DiagramRepresentation = {
+    mode: 'representative-group',
+    totalGroups,
+    playersPerGroup,
+    representedGroups: 1,
+    label: `${totalGroups} cặp thực hiện đồng thời`,
+  };
+
+  const diag: StructuredDrillDiagram = {
+    pitch,
+    players,
+    balls,
+    cones,
+    goals,
+    zones,
+    paths,
+    representation,
+    playerOrganization: pOrg || {
+      groups: totalGroups,
+      playersPerGroup,
+      leftover: 0,
+      leftoverRole: 'none',
+    },
+  };
+
+  const contextText = [options.topic, options.exerciseName, options.execution].filter(Boolean).join(' ');
+  diag.animation = buildSemanticAnimation(diag, contextText || options.execution);
+
+  return diag;
+}
+
+export interface RepresentationDisplayLabel {
+  primary: string;
+  secondary?: string;
+}
+
+/**
+ * Pure helper for deriving representation display label (TASK REP-B).
+ * Derives:
+ * - singular/plural group wording (2 => 'cặp', other => 'nhóm')
+ * - representedGroups / totalGroups
+ * - optional organization label
+ * Prefer Vietnamese output.
+ */
+export function getRepresentationDisplayLabel(
+  representation?: DiagramRepresentation | null
+): RepresentationDisplayLabel | null {
+  if (!representation || representation.mode !== 'representative-group') {
+    return null;
+  }
+
+  const totalGroups = typeof representation.totalGroups === 'number' && representation.totalGroups > 0
+    ? representation.totalGroups
+    : 1;
+  const represented = typeof representation.representedGroups === 'number' && representation.representedGroups > 0
+    ? representation.representedGroups
+    : 1;
+  const ppg = typeof representation.playersPerGroup === 'number' && representation.playersPerGroup > 0
+    ? representation.playersPerGroup
+    : 2;
+
+  const unit = ppg === 2 ? 'cặp' : 'nhóm';
+  const primary = `Minh họa ${represented}/${totalGroups} ${unit}`;
+  const secondary = representation.label && representation.label.trim().length > 0
+    ? representation.label.trim()
+    : `${totalGroups} ${unit} thực hiện đồng thời`;
+
+  return {
+    primary,
+    secondary,
+  };
 }
 
 /**
@@ -3762,6 +4080,11 @@ export function buildDefaultStructuredDiagram(options: BuildDiagramOptions): Str
     (pOrg && pOrg.playersPerGroup === 3 && pOrg.groups >= 2) ||
     /nhóm 3 người|groups of 3|tổ tam giác|trạm 3 người/i.test(orgText);
 
+  const repMode = options.representationMode;
+  const isRepresentative =
+    repMode === 'representative-group' ||
+    (repMode !== 'full' && Boolean(options.preferRepresentative) && shouldUseRepresentativeGroup(options));
+
   // 1. Match phase takes precedence for match
   let diag: StructuredDrillDiagram;
   if (options.blockType === 'match' || /thi đấu \d+v\d+|trận đấu \d+v\d+/i.test(orgText)) {
@@ -3769,6 +4092,9 @@ export function buildDefaultStructuredDiagram(options: BuildDiagramOptions): Str
   } else if (options.blockType === 'small_sided') {
     // 2. Small-sided game takes precedence for small_sided
     diag = buildSmallSidedDiagram(count, options);
+  } else if (isRepresentative && (isExplicitPairs || (pOrg && pOrg.playersPerGroup === 2))) {
+    // Representative pair mode applies
+    diag = buildRepresentativePairDiagram(count, options);
   } else if (isExplicitPairs) {
     // 3. Stated grouping takes precedence over default drill layout
     diag = buildPairDiagram(count, options);
@@ -3780,10 +4106,11 @@ export function buildDefaultStructuredDiagram(options: BuildDiagramOptions): Str
     // 4. Fallback based on blockType and organization
     diag = buildSkillDiagram(count, options);
   } else if (options.blockType === 'warm_up') {
-    diag = buildPairDiagram(count, options);
+    diag = isRepresentative ? buildRepresentativePairDiagram(count, options) : buildPairDiagram(count, options);
   } else if (options.blockType === 'technical') {
-    if (pOrg?.playersPerGroup === 2) diag = buildPairDiagram(count, options);
-    else if (pOrg?.playersPerGroup === 3) diag = buildTrioStationDiagram(count, options);
+    if (pOrg?.playersPerGroup === 2) {
+      diag = isRepresentative ? buildRepresentativePairDiagram(count, options) : buildPairDiagram(count, options);
+    } else if (pOrg?.playersPerGroup === 3) diag = buildTrioStationDiagram(count, options);
     else diag = buildQuadStationDiagram(count, options);
   } else {
     diag = buildQuadStationDiagram(count, options);
@@ -3883,11 +4210,31 @@ export function safeStructuredDiagram(
               coachingSequence: sanitizedSequence,
             }
           : buildSemanticAnimation(d, fallbackOptions.execution),
+        representation: d.representation
+          ? {
+              mode: d.representation.mode,
+              totalGroups: d.representation.totalGroups,
+              playersPerGroup: d.representation.playersPerGroup,
+              representedGroups: d.representation.representedGroups,
+              label: d.representation.label,
+            }
+          : undefined,
+        playerOrganization: d.playerOrganization
+          ? { ...d.playerOrganization }
+          : fallbackOptions.playerOrganization
+            ? { ...fallbackOptions.playerOrganization }
+            : undefined,
       };
     }
   }
 
-  return buildDefaultStructuredDiagram(fallbackOptions);
+  const effectiveFallbackOptions: BuildDiagramOptions = {
+    ...fallbackOptions,
+    representationMode:
+      fallbackOptions.representationMode ??
+      ((diagram as any)?.representation?.mode === 'representative-group' ? 'representative-group' : undefined),
+  };
+  return buildDefaultStructuredDiagram(effectiveFallbackOptions);
 }
 
 export interface ResolvedPath {

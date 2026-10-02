@@ -176,6 +176,14 @@ export interface DiagramAnimation {
   coachingSequence?: DiagramCoachingSequence;
 }
 
+export interface DiagramRepresentation {
+  mode: 'full' | 'representative-group';
+  totalGroups: number;
+  playersPerGroup: number;
+  representedGroups: number;
+  label?: string;
+}
+
 export interface StructuredDrillDiagram {
   pitch: DiagramPitch;
   players: DiagramPlayer[];
@@ -186,6 +194,7 @@ export interface StructuredDrillDiagram {
   paths: DiagramPath[];
   animation?: DiagramAnimation;
   playerOrganization?: ExercisePlayerOrganization;
+  representation?: DiagramRepresentation;
 }
 
 export type GenerationSource = 'gemini' | 'fallback';

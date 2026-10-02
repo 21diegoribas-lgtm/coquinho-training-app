@@ -10,6 +10,7 @@ import {
   evaluateMediaExportCapability,
   generateVideoFilename,
   getExportCoachingMoments,
+  getRepresentationDisplayLabel,
   isBrowserVideoExportSupported,
   mapPresentationTimeToTimeline,
   PREFERRED_WEBM_CODECS,
@@ -700,5 +701,215 @@ test('FIX-A: interactive playback and exported video use identical effective dur
   assert.equal(narrSlots.length, 1);
   assert.equal(narrSlots[0].startPresentationTime, presTrigger + COACHING_ENTER_DURATION);
   assert.equal(narrSlots[0].duration, Math.round((interactiveDuration - COACHING_ENTER_DURATION - COACHING_EXIT_DURATION) * 100) / 100);
+});
+
+// =============================================================================
+// TASK REP-B TESTS: REPRESENTATIVE GROUP LABEL & VIDEO EXPORT INTEGRATION
+// =============================================================================
+
+test('REP-B: getRepresentationDisplayLabel derives primary and secondary display labels for representative-group mode', () => {
+  // 1. 8 groups of 2 (pairs)
+  const rep8Pairs = getRepresentationDisplayLabel({
+    mode: 'representative-group',
+    totalGroups: 8,
+    playersPerGroup: 2,
+    representedGroups: 1,
+    label: '8 cặp thực hiện đồng thời',
+  });
+  assert.ok(rep8Pairs);
+  assert.equal(rep8Pairs.primary, 'Minh họa 1/8 cặp');
+  assert.equal(rep8Pairs.secondary, '8 cặp thực hiện đồng thời');
+
+  // 2. 4 groups of 4 (groups)
+  const rep4Groups = getRepresentationDisplayLabel({
+    mode: 'representative-group',
+    totalGroups: 4,
+    playersPerGroup: 4,
+    representedGroups: 1,
+  });
+  assert.ok(rep4Groups);
+  assert.equal(rep4Groups.primary, 'Minh họa 1/4 nhóm');
+  assert.equal(rep4Groups.secondary, '4 nhóm thực hiện đồng thời');
+
+  // 3. 3 groups of 3 (groups)
+  const rep3Groups = getRepresentationDisplayLabel({
+    mode: 'representative-group',
+    totalGroups: 3,
+    playersPerGroup: 3,
+    representedGroups: 1,
+  });
+  assert.ok(rep3Groups);
+  assert.equal(rep3Groups.primary, 'Minh họa 1/3 nhóm');
+  assert.equal(rep3Groups.secondary, '3 nhóm thực hiện đồng thời');
+
+  // 4. Custom label is preserved when provided
+  const repCustom = getRepresentationDisplayLabel({
+    mode: 'representative-group',
+    totalGroups: 6,
+    playersPerGroup: 2,
+    representedGroups: 1,
+    label: '6 trạm chuyền bóng độc lập',
+  });
+  assert.ok(repCustom);
+  assert.equal(repCustom.primary, 'Minh họa 1/6 cặp');
+  assert.equal(repCustom.secondary, '6 trạm chuyền bóng độc lập');
+
+  // 5. Returns null for mode: 'full' or undefined/null
+  assert.equal(getRepresentationDisplayLabel(undefined), null);
+  assert.equal(getRepresentationDisplayLabel(null), null);
+  assert.equal(
+    getRepresentationDisplayLabel({
+      mode: 'full',
+      totalGroups: 8,
+      playersPerGroup: 2,
+      representedGroups: 8,
+    }),
+    null
+  );
+});
+
+test('REP-B: renderDiagramFrameToSvgString renders representative label in fixed overlay layer', () => {
+  const repDiag: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', role: 'passer', x: 32, y: 30 },
+      { id: 'p2', team: 'blue', role: 'receiver', x: 68, y: 30 },
+    ],
+    balls: [{ id: 'b1', x: 36, y: 30 }],
+    cones: [
+      { id: 'c1', x: 50, y: 22 },
+      { id: 'c2', x: 50, y: 38 },
+    ],
+    goals: [],
+    zones: [],
+    paths: [{ id: 'path1', type: 'pass', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+    representation: {
+      mode: 'representative-group',
+      totalGroups: 8,
+      playersPerGroup: 2,
+      representedGroups: 1,
+      label: '8 cặp thực hiện đồng thời',
+    },
+    animation: {
+      duration: 5.0,
+      steps: [
+        {
+          id: 'step1',
+          start: 0,
+          duration: 2.5,
+          actions: [{ type: 'ballPass', ballId: 'b1', fromPlayerId: 'p1', toPlayerId: 'p2' }],
+        },
+      ],
+      coachingMoments: [
+        {
+          id: 'cm-rep',
+          time: 1.5,
+          duration: 2.0,
+          playerId: 'p2',
+          title: 'Mở thân người',
+          text: 'Mở thân người trước khi nhận bóng',
+          orientation: 45,
+          focus: { zoom: 2.0 },
+        },
+      ],
+    },
+  };
+
+  const anim = repDiag.animation!;
+
+  // 1. Normal running frame: representative badge is rendered in SVG overlay
+  const normalMapping = mapPresentationTimeToTimeline(0.5, anim, repDiag);
+  const normalSvg = renderDiagramFrameToSvgString(repDiag, normalMapping, 1200, 720);
+
+  assert.ok(normalSvg.includes('class="representation-badge-overlay"'), 'SVG must include representation-badge-overlay');
+  assert.ok(normalSvg.includes('Minh họa 1/8 cặp'), 'SVG must include primary representation text');
+  assert.ok(normalSvg.includes('8 cặp thực hiện đồng thời'), 'SVG must include secondary representation text');
+
+  // Verify exported SVG only contains representative players (p1, p2) and b1
+  assert.ok(normalSvg.includes('>1</text>') || normalSvg.includes('>P1</text>'), 'Contains player 1');
+  assert.ok(normalSvg.includes('>2</text>') || normalSvg.includes('>P2</text>'), 'Contains player 2');
+  assert.ok(!normalSvg.includes('>3</text>') && !normalSvg.includes('>P3</text>'), 'Must NOT regenerate player 3');
+  assert.ok(!normalSvg.includes('>16</text>') && !normalSvg.includes('>P16</text>'), 'Must NOT regenerate player 16');
+
+  // 2. Frozen coaching moment frame with camera zoom:
+  // Representative label stays in fixed screen coordinates outside zooming tactical SVG
+  const frozenMapping = mapPresentationTimeToTimeline(2.0, anim, repDiag);
+  assert.equal(frozenMapping.isFrozen, true);
+  assert.notEqual(frozenMapping.cameraViewBox, '0 0 1000 600', 'Camera must be zoomed');
+
+  const frozenSvg = renderDiagramFrameToSvgString(repDiag, frozenMapping, 1200, 720);
+  assert.ok(frozenSvg.includes('class="representation-badge-overlay"'), 'Badge must remain visible during coaching zoom');
+  assert.ok(frozenSvg.includes('Minh họa 1/8 cặp'), 'Badge text intact during coaching zoom');
+  assert.ok(frozenSvg.includes('class="coaching-card-overlay"'), 'Coaching card is also rendered');
+
+  // Visual priority check: coaching card is rendered after representation badge in SVG document order
+  const badgeIdx = frozenSvg.indexOf('representation-badge-overlay');
+  const coachIdx = frozenSvg.indexOf('coaching-card-overlay');
+  assert.ok(badgeIdx >= 0 && coachIdx >= 0 && badgeIdx < coachIdx, 'Coaching card has higher visual priority in SVG stack');
+});
+
+test('REP-B: renderDiagramFrameToSvgString does not render representative badge for full diagrams', () => {
+  const fullDiag: StructuredDrillDiagram = {
+    pitch: { width: 100, height: 60 },
+    players: [
+      { id: 'p1', team: 'blue', x: 20, y: 30 },
+      { id: 'p2', team: 'red', x: 60, y: 30 },
+    ],
+    balls: [{ id: 'b1', x: 20, y: 30 }],
+    cones: [],
+    goals: [],
+    zones: [],
+    paths: [],
+    representation: {
+      mode: 'full',
+      totalGroups: 1,
+      playersPerGroup: 2,
+      representedGroups: 1,
+    },
+    animation: {
+      duration: 4.0,
+      steps: [],
+    },
+  };
+
+  const anim = fullDiag.animation!;
+  const mapping = mapPresentationTimeToTimeline(1.0, anim, fullDiag);
+  const svg = renderDiagramFrameToSvgString(fullDiag, mapping, 1200, 720);
+
+  assert.ok(!svg.includes('class="representation-badge-overlay"'), 'Full mode diagram must not render representation badge');
+});
+
+test('REP-B TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 representative pair video export end-to-end', () => {
+  // Build representative pair diagram for the canonical 16-player unopposed drill
+  const repDiagram = buildDefaultStructuredDiagram({
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 cặp chuyền và nhận bóng mở thân người không đối kháng',
+    execution: 'p1 chuyền cho p2, p2 mở thân người',
+    topic: 'Nhận bóng mở thân người',
+    representationMode: 'representative-group',
+  });
+
+  assert.equal(repDiagram.representation?.mode, 'representative-group');
+  assert.equal(repDiagram.representation?.totalGroups, 8);
+  assert.equal(repDiagram.representation?.playersPerGroup, 2);
+  assert.equal(repDiagram.representation?.representedGroups, 1);
+  assert.equal(repDiagram.players.length, 2);
+
+  // Pre-flight validation
+  const preflight = validateExportPreconditions(repDiagram, { fps: 30 }, (m) => m.includes('webm'));
+  assert.equal(preflight.valid, true, `Preconditions must pass: ${preflight.error}`);
+
+  // Frame rendering check
+  const anim = repDiagram.animation!;
+  const mapping = mapPresentationTimeToTimeline(0.5, anim, repDiagram);
+  const svg = renderDiagramFrameToSvgString(repDiagram, mapping, 1200, 720);
+
+  assert.ok(svg.includes('class="representation-badge-overlay"'));
+  assert.ok(svg.includes('Minh họa 1/8 cặp'));
+  assert.ok(svg.includes('8 cặp thực hiện đồng thời'));
+  assert.equal(mapping.interpolatedState.players.length, 2);
+  assert.equal(mapping.interpolatedState.balls.length, 1);
 });
 

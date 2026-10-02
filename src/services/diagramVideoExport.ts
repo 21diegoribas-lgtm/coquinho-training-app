@@ -23,10 +23,12 @@ import {
   getCoachingSequenceProgress,
   getEffectiveCoachingDuration,
   getGoalGeometry,
+  getRepresentationDisplayLabel,
   getTeamStyle,
   interpolateAnimationState,
   interpolateViewBox,
   reconstructPlayerOrientation,
+  RepresentationDisplayLabel,
   resolvePathCoordinates,
 } from './structuredDiagram';
 
@@ -731,7 +733,25 @@ export function renderDiagramFrameToSvgString(
   });
   boardContent += `</g>`;
 
-  // 2. Fixed Overlay Layer (Coaching Card & Sequence Indicator)
+  // 2. Fixed Overlay Layer: Representative Group Badge & Coaching Card
+  const repLabel = getRepresentationDisplayLabel(diagram.representation);
+  let repBadgeContent = '';
+  if (repLabel) {
+    const badgeWidth = 190;
+    const badgeHeight = repLabel.secondary ? 40 : 24;
+    const badgeX = width - badgeWidth - 20;
+    const badgeY = 20;
+
+    repBadgeContent = `
+      <g class="representation-badge-overlay" data-testid="representation-badge-export">
+        <rect x="${badgeX}" y="${badgeY}" width="${badgeWidth}" height="${badgeHeight}" rx="6" fill="rgba(18, 19, 22, 0.88)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="1" />
+        <circle cx="${badgeX + 14}" cy="${badgeY + 14}" r="3.5" fill="#34d399" />
+        <text x="${badgeX + 24}" y="${badgeY + 18}" fill="#6ee7b7" font-size="11.5" font-weight="bold" font-family="sans-serif">${escapeXml(repLabel.primary)}</text>
+        ${repLabel.secondary ? `<text x="${badgeX + 24}" y="${badgeY + 31}" fill="rgba(255, 255, 255, 0.75)" font-size="9.5" font-family="sans-serif">${escapeXml(repLabel.secondary)}</text>` : ''}
+      </g>
+    `;
+  }
+
   let overlayContent = '';
   if (mapping.activeMoment && mapping.phaseState && mapping.phaseState.textOpacity > 0) {
     const cardWidth = Math.min(800, width * 0.7);
@@ -784,6 +804,7 @@ export function renderDiagramFrameToSvgString(
   </svg>
 
   <!-- Overlay Layer: fixed screen coordinates -->
+  ${repBadgeContent}
   ${overlayContent}
 </svg>`;
 }
@@ -1163,3 +1184,5 @@ export function exportAndDownloadDiagramVideo(
     promise,
   };
 }
+
+export { getRepresentationDisplayLabel, type RepresentationDisplayLabel } from './structuredDiagram';
