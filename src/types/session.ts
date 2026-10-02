@@ -62,6 +62,7 @@ export interface DiagramPlayer {
   role?: string;
   x: number; // 0 to 100 percentage
   y: number; // 0 to 100 percentage
+  orientation?: number; // 0-359 degrees facing direction
 }
 
 export interface DiagramBall {
@@ -101,6 +102,62 @@ export interface DiagramPath {
   toPlayerId?: string;
 }
 
+export interface DiagramCoordinate {
+  x: number;
+  y: number;
+}
+
+export interface PlayerMoveAction {
+  type: 'playerMove';
+  playerId: string;
+  to: DiagramCoordinate;
+}
+
+export interface BallPassAction {
+  type: 'ballPass';
+  ballId: string;
+  fromPlayerId: string;
+  toPlayerId: string;
+}
+
+export interface BallDribbleAction {
+  type: 'ballDribble';
+  ballId: string;
+  playerId: string;
+  to: DiagramCoordinate;
+}
+
+export type DiagramAnimationAction = PlayerMoveAction | BallPassAction | BallDribbleAction;
+
+export interface DiagramAnimationStep {
+  id: string;
+  start: number; // in seconds
+  duration: number; // in seconds
+  actions: DiagramAnimationAction[];
+}
+
+export interface CoachingMomentFocus {
+  zoom?: number; // Safe range: 1.0–3.0 (default ~1.6–2.0)
+}
+
+export interface DiagramCoachingMoment {
+  id: string;
+  time: number; // in seconds (animation timeline trigger)
+  duration: number; // in seconds (presentation freeze duration)
+  playerId: string;
+  title: string;
+  text: string;
+  focus?: CoachingMomentFocus;
+  highlight?: boolean;
+  orientation?: number; // 0-359 degrees
+}
+
+export interface DiagramAnimation {
+  duration: number; // total duration in seconds
+  steps: DiagramAnimationStep[];
+  coachingMoments?: DiagramCoachingMoment[];
+}
+
 export interface StructuredDrillDiagram {
   pitch: DiagramPitch;
   players: DiagramPlayer[];
@@ -109,6 +166,7 @@ export interface StructuredDrillDiagram {
   goals: DiagramGoal[];
   zones: DiagramZone[];
   paths: DiagramPath[];
+  animation?: DiagramAnimation;
 }
 
 export type GenerationSource = 'gemini' | 'fallback';

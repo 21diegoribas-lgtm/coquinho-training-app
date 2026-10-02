@@ -140,6 +140,11 @@ export function sanitizeGeminiPlan(
         playerOrganization: playerOrg,
         exerciseName: asNonEmptyString(ph.exerciseName, `Bài tập ${idx + 1}`),
         topic: fallbacks.topic,
+        organization: explicitOrganization(String(ph.organization), fallbacks.players, playerOrg),
+        execution: asNonEmptyString(ph.execution, 'Cầu thủ thực hiện các bài tập.'),
+        equipment: asStringArray(ph.equipment, ['Bóng', 'Cọc tiêu', 'Áo bib']),
+        area: asNonEmptyString(ph.area, '25 × 20 m'),
+        gameFormat: fallbacks.gameFormat,
       }),
     };
   });

@@ -356,20 +356,22 @@ NGUYÊN TẮC HUẤN LUYỆN CỐT LÕI (CORE COACHING PRINCIPLES):
 10. DỤNG CỤ (EQUIPMENT) PHẢI KHỚP VỚI BÀI TẬP:
    - Nếu bài tập hoặc trận đấu có sử dụng khung thành (khung thành mini, khung thành sân 7, sân 9, sân 11...), KHUNG THÀNH BẮT BUỘC PHẢI CÓ trong danh sách equipment của giai đoạn đó.
 11. DỮ LIỆU SƠ ĐỒ CHIẾN THUẬT (STRUCTURED DIAGRAM) - ĐỒNG BỘ NGỮ NGHĨA VỚI BÀI TẬP:
-   - Sơ đồ 'diagram' BẮT BUỘC phản ánh chính xác cấu trúc thực tế của từng bài tập, KHÔNG dùng sơ đồ chung chung:
-   - ĐỒNG BỘ PHÂN NHÓM (GROUPING): Cấu trúc nhóm cầu thủ trên sơ đồ phải khớp với organization:
-     + 8 nhóm 2 người: BẮT BUỘC thể hiện 8 cặp riêng biệt trên sân (TUYỆT ĐỐI KHÔNG vẽ thành 4 nhóm 4).
-     + 4 nhóm 4 người: BẮT BUỘC bố trí 4 trạm/nhóm 4 người riêng biệt.
-     + Trận đấu 8v8 (hoặc trận cuối): BẮT BUỘC hiển thị đúng 16 cầu thủ chia 2 đội rõ rệt kèm 2 thủ môn.
-   - ĐỒNG BỘ TÍNH CHẤT ĐỐI KHÁNG (TEAMS / OPPOSITION):
-     + Bài tập không đối kháng (khởi động chuyền đôi, kỹ thuật không hậu vệ): TOÀN BỘ cầu thủ thuộc team 'blue', TUYỆT ĐỐI KHÔNG tự tạo hậu vệ 'red'.
-     + Bài tập có đối kháng (kỹ năng, trò chơi nhỏ, trận đấu): phân chia rõ ràng hai đội 'blue' và 'red' (+ 'neutral' nếu có Joker, 'goalkeeper' cho thủ môn).
-   - ĐỒNG BỘ DỤNG CỤ VÀ KHUNG THÀNH (EQUIPMENT & GOALS):
-     + NẾU EQUIPMENT KHÔNG CÓ KHUNG THÀNH: goals BẮT BUỘC PHẢI LÀ [] (TUYỆT ĐỐI KHÔNG tự bịa khung thành mini nếu bài tập không sử dụng).
-     + Nếu equipment có 4 cầu môn nhỏ / mini: goals phải có đúng 4 khung thành type 'mini'.
-     + Nếu bài tập là trận đấu có 2 khung thành: goals phải có đúng 2 khung thành type 'standard'.
-   - KHU VỰC CHIẾN THUẬT (ZONES): CHỈ vẽ các hành lang/khu vực (zones) khi bài tập hoặc trò chơi thực sự mô tả chia làn (ví dụ: 3 hành lang biên - trung tâm). Các bài tập thông thường để zones: [].
-   - ĐƯỜNG DẪN / HÀNH ĐỘNG (PATHS): Thể hiện hành động ban đầu rõ ràng; fromPlayerId và toPlayerId phải tồn tại trong players.
+   - Sơ đồ 'diagram' BẮT BUỘC phản ánh chính xác cấu trúc thực tế của từng bài tập, KHÔNG suy đoán từ blockType đơn thuần mà PHẢI SUY RA TỪ TOÀN BỘ NỘI DUNG (playerCount, playerOrganization, organization, execution, equipment).
+   - QUY TRÌNH KIỂM TRA ĐỐI CHIẾU NGỮ NGHĨA (CROSS-CHECK MANDATE TRƯỚC KHI TRẢ VỀ):
+     + 1. PHÂN NHÓM CẦU THỦ (PLAYER GROUPING): Cấu trúc nhóm cầu thủ trên sơ đồ phải khớp tuyệt đối với textual organization:
+       * "8 nhóm 2" (hoặc 8 cặp) -> BẮT BUỘC thể hiện đúng 8 cặp riêng biệt trên sân (TUYỆT ĐỐI KHÔNG vẽ thành 4 nhóm 4).
+       * "4 nhóm 4" -> BẮT BUỘC bố trí 4 trạm/nhóm 4 riêng biệt.
+       * "8v8" -> BẮT BUỘC hiển thị đúng 2 đội gồm 8 cầu thủ mỗi bên (tổng 16 cầu thủ).
+     + 2. QUÂN SỐ CẦU THỦ (PLAYER COUNT): Tổng số lượng marker cầu thủ trong 'players' PHẢI BẰNG CHÍNH XÁC số cầu thủ tham gia (phase.players). Không được bịa thêm hoặc bỏ bớt cầu thủ.
+     + 3. TÍNH CHẤT ĐỐI KHÁNG & ĐỘI BÓNG (TEAMS / OPPOSITION):
+       * Bài tập không đối kháng (chuyền đôi khởi động, kỹ thuật không hậu vệ): TOÀN BỘ cầu thủ thuộc team 'blue', TUYỆT ĐỐI KHÔNG tự tạo hậu vệ 'red'.
+       * Bài tập có đối kháng (kỹ năng, trò chơi nhỏ, trận đấu): phân chia rõ rệt hai đội 'blue' và 'red' (chỉ thêm 'neutral' khi organization có Joker, 'goalkeeper' khi có thủ môn).
+     + 4. DỤNG CỤ & KHUNG THÀNH (EQUIPMENT & GOALS):
+       * NẾU EQUIPMENT KHÔNG CÓ KHUNG THÀNH: goals BẮT BUỘC PHẢI LÀ [] (TUYỆT ĐỐI KHÔNG tự bịa khung thành mini nếu bài tập không dùng).
+       * Nếu equipment có 4 cầu môn nhỏ / mini: goals phải có đúng 4 khung thành type 'mini'.
+       * Nếu bài tập là trận đấu có 2 khung thành: goals phải có đúng 2 khung thành type 'standard'.
+     + 5. KHU VỰC CHIẾN THUẬT (ZONES): CHỈ vẽ các hành lang/khu vực (zones) khi bài tập hoặc trò chơi thực sự mô tả chia làn (ví dụ: 3 hành lang biên - trung tâm). Các bài tập thông thường để zones: [].
+     + 6. ĐƯỜNG DẪN / HÀNH ĐỘNG (ACTION PATHS): Thể hiện hành động thực tế mô tả trong bài tập (stated pass -> pass, stated movement -> movement, stated dribble -> dribble). Giữ trạng thái ban đầu rõ ràng, không vẽ mũi tên tùy tiện gây rối mắt.
    - Hệ tọa độ logic: pitch.width = 100, pitch.height = 60; x, y là phần trăm từ 0 đến 100.
 12. NGÔN NGỮ: Sử dụng thuật ngữ bóng đá tiếng Việt tự nhiên, trực quan, dễ hiểu bên đường pitch (ví dụ: "kiểm tra vai", "mở thân người góc 45 độ", "chân xa", "chạm bước một định hướng", "chuyền xuyên tuyến").
 13. ĐỊNH DẠNG: Trả về duy nhất dữ liệu JSON hợp lệ theo schema yêu cầu, không thêm bất kỳ văn bản giải thích nào khác.`;
@@ -565,19 +567,21 @@ YÊU CẦU BẮT BUỘC ĐỐI VỚI NỘI DUNG TỪNG BÀI TẬP:
   + Giai đoạn 4 (Trò chơi đối kháng): tactical application (vận dụng chiến thuật: tổ chức cự ly, khai thác biên/trung tâm, chuyển hướng sang cánh xa, chuyển trạng thái).
   + Giai đoạn 5 (Trận đấu cuối cùng): minimal intervention (HLV can thiệp tối thiểu), transfer into realistic play (chuyển hóa thực tế, tự do ra quyết định).
 - progression: 1-2 biến thể điều chỉnh độ khó hợp lý. TIẾN TRÌNH PHẢI ĐẶC THÙ CHO TỪNG BÀI TẬP, TUYỆT ĐỐI KHÔNG DÙNG LẠI CÙNG MỘT ĐOẠN VĂN PROGRESSION CHO NHIỀU GIAI ĐOẠN.
-- diagram: BẮT BUỘC cung cấp sơ đồ có cấu trúc cho mỗi phase phản ánh chính xác cấu trúc thực tế của bài tập:
-  + Phân nhóm (grouping): nếu 8 nhóm 2 người, sơ đồ PHẢI bố trí 8 cặp riêng biệt trên sân (không vẽ 4 nhóm 4). Nếu 4 nhóm 4 người, bố trí 4 trạm/nhóm 4. Nếu trận đấu (8v8), hiển thị 2 đội rõ rệt với đúng 16 cầu thủ.
-  + Đội / Đối kháng: bài tập không đối kháng (chuyền đôi khởi động, kỹ thuật không hậu vệ) TOÀN BỘ cầu thủ thuộc team "blue", không tự bịa hậu vệ "red". Bài tập có đối kháng (kỹ năng, trò chơi nhỏ, trận đấu) phân chia hai đội "blue" và "red" (+ "neutral" cho Joker, "goalkeeper" cho thủ môn).
-  + Khung thành: NẾU EQUIPMENT KHÔNG CÓ KHUNG THÀNH, goals BẮT BUỘC PHẢI LÀ []. Nếu equipment có 4 cầu môn mini, goals có đúng 4 khung thành type "mini". Nếu trận đấu có 2 khung thành, goals có đúng 2 khung thành type "standard".
-  + Khu vực (zones): CHỈ có zones khi bài tập thực sự chia hành lang (ví dụ: 3 hành lang). Các bài tập thông thường để zones: [].
+- diagram: BẮT BUỘC cung cấp sơ đồ có cấu trúc cho mỗi phase phản ánh chính xác cấu trúc thực tế của bài tập, suy ra từ toàn bộ nội dung bài tập (quân số, phân nhóm, dụng cụ, vận hành):
+  + Đối chiếu phân nhóm (player grouping): nếu 8 nhóm 2 người, sơ đồ PHẢI bố trí đúng 8 cặp riêng biệt trên sân (không vẽ 4 nhóm 4). Nếu 4 nhóm 4 người, bố trí 4 trạm/nhóm 4. Nếu trận đấu (8v8), hiển thị 2 đội rõ rệt với đúng 16 cầu thủ.
+  + Đối chiếu quân số (player count): Tổng số cầu thủ trong diagram.players PHẢI BẰNG ĐÚNG ${playerCount}. Không tự ý bịa thêm hoặc thiếu cầu thủ.
+  + Đối chiếu đội / đối kháng (teams / opposition): bài tập không đối kháng (chuyền đôi khởi động, kỹ thuật không hậu vệ) TOÀN BỘ cầu thủ thuộc team "blue", không tự bịa hậu vệ "red". Bài tập có đối kháng (kỹ năng, trò chơi nhỏ, trận đấu) phân chia hai đội "blue" và "red" (+ "neutral" cho Joker, "goalkeeper" cho thủ môn).
+  + Đối chiếu dụng cụ và khung thành (equipment & goals): NẾU EQUIPMENT KHÔNG CÓ KHUNG THÀNH, goals BẮT BUỘC PHẢI LÀ []. Nếu equipment có 4 cầu môn mini, goals có đúng 4 khung thành type "mini". Nếu trận đấu có 2 khung thành, goals có đúng 2 khung thành type "standard".
+  + Đối chiếu khu vực (zones): CHỈ có zones khi bài tập thực sự chia hành lang (ví dụ: 3 hành lang). Các bài tập thông thường để zones: [].
+  + Đối chiếu hành động (action paths): Thể hiện hành động ban đầu rõ ràng mô tả trong bài tập (pass, movement, dribble); fromPlayerId và toPlayerId phải tồn tại trong players.
   + pitch: { width: 100, height: 60 }
-  + players: danh sách cầu thủ [{ id: "p1", team: "blue", role: "...", x: 20, y: 30 }, ...]. Tọa độ x, y từ 0 đến 100. Số lượng cầu thủ phải khớp logic với tổ chức và KHÔNG VƯỢT QUÁ ${playerCount}. Giá trị team chỉ gồm: "blue" | "red" | "neutral" | "goalkeeper".
+  + players: danh sách cầu thủ [{ id: "p1", team: "blue", role: "...", x: 20, y: 30 }, ...]. Tọa độ x, y từ 0 đến 100.
   + balls: danh sách bóng [{ id: "b1", x: 22, y: 30 }]
   + cones: danh sách cọc [{ id: "c1", x: 10, y: 10 }]
   + goals: danh sách khung thành
   + zones: [] hoặc khu vực chiến thuật
-  + paths: danh sách đường dẫn [{ id: "path1", type: "pass", fromPlayerId: "p1", toPlayerId: "p2" }]. type chỉ gồm: "pass" | "movement" | "dribble". fromPlayerId và toPlayerId phải tồn tại trong players.
-  + Dữ liệu tĩnh, đơn giản, không animation timing.
+  + paths: danh sách đường dẫn [{ id: "path1", type: "pass", fromPlayerId: "p1", toPlayerId: "p2" }]
+  + Dữ liệu tĩnh, rõ ràng, thiết lập ban đầu không gây rối mắt.
 - Kiểm tra tính nhất quán trước khi trả lời: số giai đoạn trong sessionOverview phải bằng phases.length; tổng thời gian các giai đoạn bằng thời lượng buổi tập, không tự chèn nghỉ giữa buổi. Tên bài tập phải khớp thể thức trong organization và playerOrganization. Với bối cảnh 7v7 nhưng thi đấu 8v8, ghi rõ "8v8 đại diện điều chỉnh (bối cảnh 7v7)", không gọi là trận 7v7 tiêu chuẩn. Điều kiện ghi điểm phải quan sát và đếm được (đường chuyền hoàn thành, vị trí nhận hoặc bàn thắng); bàn thắng bình thường vẫn hợp lệ. Không bắt buộc xoay người, mở thân hay chuyền lên bất kể áp lực; cho phép che bóng, nhả lại hoặc đổi hướng khi bị khóa.
 
 Hãy tạo giáo án xuất sắc, chuẩn mực sư phạm và trả về đúng định dạng JSON yêu cầu.`;

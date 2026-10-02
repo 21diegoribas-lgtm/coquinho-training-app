@@ -1,5 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Play, Pause, RotateCcw } from 'lucide-react';
 import {
+  DiagramCoachingMoment,
   DiagramGoal,
   DiagramPlayer,
   PitchDiagramData,
@@ -7,9 +9,15 @@ import {
   StructuredDrillDiagram,
 } from '../types/session';
 import {
+  buildSemanticAnimation,
   buildWavyPath,
+  calculateCameraViewBox,
+  formatCoachingOverlayText,
+  getCoachingPhaseState,
   getGoalGeometry,
   getTeamStyle,
+  interpolateAnimationState,
+  interpolateViewBox,
   resolvePathCoordinates,
 } from '../services/structuredDiagram';
 
@@ -45,6 +53,7 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
         diagram={diagram}
         className={className}
         highlightPlayerId={highlightPlayerId}
+        isSimulating={isSimulating}
       />
     );
   }
@@ -60,18 +69,20 @@ export const PitchDiagram: React.FC<PitchDiagramProps> = ({
 };
 
 // =============================================================================
-// NEW STRUCTURED DIAGRAM RENDERER (D2)
+// NEW STRUCTURED DIAGRAM RENDERER (D2 / D4)
 // =============================================================================
 interface StructuredViewProps {
   diagram: StructuredDrillDiagram;
   className?: string;
   highlightPlayerId?: string;
+  isSimulating?: boolean;
 }
 
 const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
   diagram,
   className = '',
   highlightPlayerId,
+  isSimulating = false,
 }) => {
   // Hệ tọa độ logic chuẩn 1000 x 600 (tỷ lệ 5:3 khớp pitch width 100 / height 60)
   const toX = (pct: number) => {
@@ -84,12 +95,151 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     return (Math.max(0, Math.min(100, pct)) / 100) * 600;
   };
 
-  const players = Array.isArray(diagram.players) ? diagram.players : [];
-  const balls = Array.isArray(diagram.balls) ? diagram.balls : [];
+  // Derive or use existing animation sequence
+  const effectiveAnimation = useMemo(() => {
+    if (diagram.animation && Array.isArray(diagram.animation.steps) && diagram.animation.steps.length > 0) {
+      return diagram.animation;
+    }
+    return buildSemanticAnimation(diagram);
+  }, [diagram]);
+
+  const [isPlaying, setIsPlaying] = useState<boolean>(Boolean(isSimulating));
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [activeCoachingMoment, setActiveCoachingMoment] = useState<DiagramCoachingMoment | null>(null);
+  const [coachingElapsed, setCoachingElapsed] = useState<number>(0);
+  const triggeredMomentsRef = useRef<Set<string>>(new Set());
+
+  // Synchronize with external isSimulating prop from exercise card
+  useEffect(() => {
+    if (isSimulating !== undefined) {
+      setIsPlaying(isSimulating);
+      if (!isSimulating) {
+        setCurrentTime(0);
+        setActiveCoachingMoment(null);
+        setCoachingElapsed(0);
+        triggeredMomentsRef.current.clear();
+      }
+    }
+  }, [isSimulating]);
+
+  // Playback requestAnimationFrame loop with coaching moment freeze logic (TASK D5)
+  useEffect(() => {
+    if (!isPlaying || !effectiveAnimation || effectiveAnimation.duration <= 0) return;
+    let animFrameId: number;
+    let lastTime = performance.now();
+
+    const tick = (now: number) => {
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+
+      if (activeCoachingMoment) {
+        // In coaching moment: drill animation visually freezes; presentation timer advances
+        setCoachingElapsed((prev) => {
+          const next = prev + dt;
+          if (next >= activeCoachingMoment.duration) {
+            // Presentation duration finished: exit freeze and resume normal animation
+            setActiveCoachingMoment(null);
+            return 0;
+          }
+          return next;
+        });
+      } else {
+        // Normal animation progression
+        setCurrentTime((prev) => {
+          const next = prev + dt;
+
+          // Check if natural playback reaches any un-triggered coaching moment
+          const moments = effectiveAnimation.coachingMoments || [];
+          const trigger = moments.find(
+            (m) =>
+              !triggeredMomentsRef.current.has(m.id) &&
+              m.time >= prev - 0.05 &&
+              m.time <= next + 0.05
+          );
+
+          if (trigger) {
+            triggeredMomentsRef.current.add(trigger.id);
+            setActiveCoachingMoment(trigger);
+            setCoachingElapsed(0);
+            return trigger.time; // Freeze at exact coaching timestamp
+          }
+
+          if (next >= effectiveAnimation.duration) {
+            triggeredMomentsRef.current.clear();
+            return 0;
+          }
+          return next;
+        });
+      }
+
+      animFrameId = requestAnimationFrame(tick);
+    };
+
+    animFrameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animFrameId);
+  }, [isPlaying, effectiveAnimation, activeCoachingMoment]);
+
+  const togglePlay = () => {
+    setIsPlaying((prev) => !prev);
+  };
+
+  const handleReset = () => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setActiveCoachingMoment(null);
+    setCoachingElapsed(0);
+    triggeredMomentsRef.current.clear();
+  };
+
+  const handleSeek = (newTime: number) => {
+    setCurrentTime(newTime);
+    setActiveCoachingMoment(null);
+    setCoachingElapsed(0);
+    const moments = effectiveAnimation?.coachingMoments || [];
+    for (const m of moments) {
+      if (m.time >= newTime) {
+        triggeredMomentsRef.current.delete(m.id);
+      }
+    }
+  };
+
+  // Interpolated player & ball state at currentTime; restores exact diagram positions on stop/reset
+  const displayState = useMemo(() => {
+    if ((!isPlaying && currentTime === 0) || !effectiveAnimation) {
+      return {
+        players: Array.isArray(diagram.players) ? diagram.players : [],
+        balls: Array.isArray(diagram.balls) ? diagram.balls : [],
+      };
+    }
+    return interpolateAnimationState({ ...diagram, animation: effectiveAnimation }, currentTime);
+  }, [diagram, effectiveAnimation, isPlaying, currentTime]);
+
+  const players = displayState.players;
+  const balls = displayState.balls;
   const cones = Array.isArray(diagram.cones) ? diagram.cones : [];
   const goals = Array.isArray(diagram.goals) ? diagram.goals : [];
   const zones = Array.isArray(diagram.zones) ? diagram.zones : [];
   const paths = Array.isArray(diagram.paths) ? diagram.paths : [];
+
+  const phaseState = useMemo(() => {
+    if (!activeCoachingMoment) return null;
+    return getCoachingPhaseState(coachingElapsed, activeCoachingMoment.duration);
+  }, [activeCoachingMoment, coachingElapsed]);
+
+  // Dynamic Camera Focus ViewBox during coaching moment with smooth ease-in, hold, ease-out (TASK D6)
+  const cameraViewBox = useMemo(() => {
+    const fullBox = { minX: 0, minY: 0, width: 1000, height: 600 };
+    if (!activeCoachingMoment || !phaseState) {
+      return '0 0 1000 600';
+    }
+    const target = players.find((p) => p.id === activeCoachingMoment.playerId);
+    if (!target) return '0 0 1000 600';
+    const tx = toX(target.x);
+    const ty = toY(target.y);
+    const zoom = activeCoachingMoment.focus?.zoom ?? 1.8;
+    const targetBox = calculateCameraViewBox(tx, ty, zoom, 1000, 600);
+    return interpolateViewBox(fullBox, targetBox, phaseState.cameraEase).viewBox;
+  }, [activeCoachingMoment, phaseState, players]);
 
   // Tạo map id -> player để giải quyết tọa độ động cho paths
   const playerMap = useMemo(() => {
@@ -135,7 +285,7 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
       {/* Khung sơ đồ với aspect-ratio 5:3 chuẩn tỷ lệ sân 100:60, hoàn toàn responsive trên mobile & desktop */}
       <div className="drill-board relative w-full aspect-[5/3] overflow-hidden rounded-lg border border-stone-300 bg-[#164336] shadow-sm select-none">
         <svg
-          viewBox="0 0 1000 600"
+          viewBox={cameraViewBox}
           preserveAspectRatio="xMidYMid meet"
           className="absolute inset-0 h-full w-full"
           aria-label="Sơ đồ bài tập bóng đá chiến thuật"
@@ -449,7 +599,17 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
               const py = toY(p.y);
               const teamStyle = getTeamStyle(p.team);
               const label = formatPlayerNumber(p);
-              const isHighlighted = highlightPlayerId === p.id;
+              const isCoachingFocus = activeCoachingMoment?.playerId === p.id;
+              const isHighlighted = highlightPlayerId === p.id || (isCoachingFocus && activeCoachingMoment?.highlight);
+              const highlightOpacity = isCoachingFocus && phaseState ? phaseState.highlightOpacity : 1;
+
+              let playerOrientation = p.orientation;
+              if (isCoachingFocus && activeCoachingMoment?.orientation !== undefined) {
+                const targetAngle = activeCoachingMoment.orientation;
+                const initialAngle = p.orientation ?? 0;
+                const progress = phaseState ? phaseState.orientationProgress : 1;
+                playerOrientation = Math.round(initialAngle + (targetAngle - initialAngle) * progress);
+              }
 
               return (
                 <g
@@ -457,8 +617,27 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
                   transform={`translate(${px}, ${py})`}
                   className="cursor-pointer"
                 >
-                  {/* Vòng viền sáng khi được highlight */}
-                  {isHighlighted && (
+                  {/* Coaching Focus Highlight Rings (TASK D5/D6) */}
+                  {isCoachingFocus && isHighlighted && highlightOpacity > 0 && (
+                    <g style={{ opacity: highlightOpacity }}>
+                      <circle
+                        r="30"
+                        fill="rgba(253, 224, 71, 0.20)"
+                        stroke="#fde047"
+                        strokeWidth="2.5"
+                      />
+                      <circle
+                        r="36"
+                        fill="none"
+                        stroke="#fde047"
+                        strokeWidth="1.5"
+                        strokeDasharray="5,4"
+                      />
+                    </g>
+                  )}
+
+                  {/* Vòng viền sáng khi được highlight thường */}
+                  {!isCoachingFocus && isHighlighted && (
                     <circle
                       r="26"
                       fill="none"
@@ -468,6 +647,19 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
                       className="animate-spin"
                       style={{ animationDuration: '4s' }}
                     />
+                  )}
+
+                  {/* Directional Orientation Arrow (TASK D5/D6) - only arrow rotates, label stays upright */}
+                  {playerOrientation !== undefined && (
+                    <g transform={`rotate(${playerOrientation})`}>
+                      <polygon
+                        points="19,-5 28,0 19,5"
+                        fill="#fde047"
+                        stroke="#0f172a"
+                        strokeWidth="1.2"
+                        filter="drop-shadow(0 1px 2px rgba(0,0,0,0.5))"
+                      />
+                    </g>
                   )}
 
                   {/* Vòng tròn thân cầu thủ */}
@@ -516,6 +708,81 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
             })}
           </g>
         </svg>
+
+        {/* Coaching Text Overlay Card (TASK D5/D6) */}
+        {activeCoachingMoment && phaseState && phaseState.textOpacity > 0 && (
+          <div
+            style={{ opacity: phaseState.textOpacity }}
+            className="absolute top-2.5 sm:top-3 left-1/2 -translate-x-1/2 z-20 w-[92%] max-w-sm sm:max-w-md rounded-lg bg-stone-900/95 p-2.5 sm:p-3 text-white shadow-xl backdrop-blur-md border border-amber-400/70 pointer-events-auto transition-opacity duration-150"
+          >
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="flex items-center gap-1.5 text-amber-400 font-bold text-xs uppercase tracking-wider truncate">
+                <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />
+                <span className="truncate">Điểm huấn luyện: {formatCoachingOverlayText(activeCoachingMoment.title, 40)}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveCoachingMoment(null);
+                  setCoachingElapsed(0);
+                }}
+                className="text-[10px] text-stone-300 hover:text-white px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 transition-all font-medium whitespace-nowrap cursor-pointer"
+                title="Bỏ qua phần giải thích và tiếp tục bài tập"
+              >
+                Tiếp tục ({Math.max(0, activeCoachingMoment.duration - coachingElapsed).toFixed(1)}s)
+              </button>
+            </div>
+            <p className="text-xs sm:text-sm text-stone-100 font-normal leading-relaxed line-clamp-3">
+              {formatCoachingOverlayText(activeCoachingMoment.text, 140)}
+            </p>
+          </div>
+        )}
+
+        {/* Minimal Playback Controls Overlay (TASK D4 / D5) */}
+        {effectiveAnimation && effectiveAnimation.duration > 0 && (
+          <div className="absolute bottom-2 left-2.5 z-10 flex items-center gap-1.5 rounded bg-black/80 px-2 py-1 text-xs text-white/95 backdrop-blur-xs shadow-sm no-print">
+            <button
+              type="button"
+              onClick={togglePlay}
+              className="flex h-6 w-6 items-center justify-center rounded hover:bg-white/20 active:scale-95 transition-all text-white focus:outline-hidden"
+              title={isPlaying ? 'Tạm dừng mô phỏng (Pause)' : 'Phát mô phỏng (Play)'}
+              aria-label={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isPlaying ? (
+                <Pause className="h-3.5 w-3.5 fill-white" />
+              ) : (
+                <Play className="h-3.5 w-3.5 fill-white ml-0.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleReset}
+              className="flex h-6 w-6 items-center justify-center rounded hover:bg-white/20 active:scale-95 transition-all text-white/80 hover:text-white focus:outline-hidden"
+              title="Đặt lại vị trí ban đầu (Reset)"
+              aria-label="Reset"
+            >
+              <RotateCcw className="h-3 w-3" />
+            </button>
+            <div className="flex items-center gap-1 pl-1 text-[11px] font-mono text-white/80 select-none">
+              <span>{currentTime.toFixed(1)}s</span>
+              <span className="text-white/40">/</span>
+              <span>{effectiveAnimation.duration.toFixed(1)}s</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={effectiveAnimation.duration}
+              step={0.05}
+              value={currentTime}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                handleSeek(val);
+              }}
+              className="w-14 sm:w-20 h-1 accent-[#38bdf8] bg-white/20 rounded cursor-pointer"
+              aria-label="Thanh trượt thời gian mô phỏng"
+            />
+          </div>
+        )}
 
         {/* Chú thích màu sắc các đội thực sự có mặt */}
         <div className="absolute bottom-2 right-2.5 flex items-center gap-2 rounded bg-black/80 px-2 py-1 text-[11px] text-white/95 backdrop-blur-xs font-medium pointer-events-none">

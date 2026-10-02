@@ -9,15 +9,35 @@ function withFormatContext(exercise: Exercise, topic: string, gameFormat: GameFo
   const { spatialSetup, execution, ...content } = formatPhaseContent(gameFormat, exercise.blockType, topic, {
     ...exercise, execution: exercise.howItWorks.join('\n'),
   });
+  const updatedOrg = `${formatPlayerDistribution(players, exercise.blockType)}. ${spatialSetup}`;
+  const updatedExecution = execution.split('\n');
+  const updatedExerciseName = exercise.blockType === 'match'
+    ? finalGameTitle(gameFormat, exercise.playerOrganization!)
+    : titleMatchesOrganization(exercise.exerciseName, formatPlayerDistribution(players, exercise.blockType), exercise.playerOrganization!)
+      ? exercise.exerciseName : content.exerciseName.replace(/\b\d+\s*v\s*\d+(?:\s*\(?\s*\+\s*\d+\s*(?:jokers?|neutrals?)[^)]*\)?)?/gi, '').trim();
+  const updatedEquipment = content.equipment || exercise.equipment;
+  const updatedArea = exercise.areaSize;
+
   return {
     ...exercise,
     ...content,
-    exerciseName: exercise.blockType === 'match'
-      ? finalGameTitle(gameFormat, exercise.playerOrganization!)
-      : titleMatchesOrganization(exercise.exerciseName, formatPlayerDistribution(players, exercise.blockType), exercise.playerOrganization!)
-        ? exercise.exerciseName : content.exerciseName.replace(/\b\d+\s*v\s*\d+(?:\s*\(?\s*\+\s*\d+\s*(?:jokers?|neutrals?)[^)]*\)?)?/gi, '').trim(),
-    organization: `${formatPlayerDistribution(players, exercise.blockType)}. ${spatialSetup}`,
-    howItWorks: execution.split('\n'),
+    exerciseName: updatedExerciseName,
+    organization: updatedOrg,
+    howItWorks: updatedExecution,
+    equipment: updatedEquipment,
+    areaSize: updatedArea,
+    diagram: buildDefaultStructuredDiagram({
+      blockType: exercise.blockType,
+      playerCount: players,
+      playerOrganization: exercise.playerOrganization,
+      exerciseName: updatedExerciseName,
+      topic,
+      organization: updatedOrg,
+      execution: execution,
+      equipment: updatedEquipment,
+      area: updatedArea,
+      gameFormat,
+    }),
   };
 }
 
