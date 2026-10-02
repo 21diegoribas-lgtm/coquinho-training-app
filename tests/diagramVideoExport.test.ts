@@ -7,19 +7,23 @@ import {
   calculateFramePresentationTime,
   combineMediaStreamTracks,
   DEFAULT_VIDEO_BITS_PER_SECOND,
+  detectPreferredNativeMp4Mime,
   evaluateMediaExportCapability,
   exportAndDownloadDiagramVideo,
   exportDiagramToVideoBlob,
+  ExportVideoFormat,
   generateVideoFilename,
   getExportCoachingMoments,
   getRepresentationDisplayLabel,
   isBrowserVideoExportSupported,
   mapPresentationTimeToTimeline,
+  PREFERRED_NATIVE_MP4_MIMES,
   PREFERRED_WEBM_CODECS,
   renderDiagramFrameToSvgString,
   safeStopMediaRecorder,
   scheduleBlobUrlCleanup,
   selectBestWebMCodec,
+  selectExportFormat,
   slugifyTitle,
   validateExportPreconditions,
   VideoExportResult,
@@ -1005,6 +1009,9 @@ class MockMediaRecorder {
   constructor(stream: MockMediaStream, options?: any) {
     this.stream = stream;
     this.options = options;
+    if (options && options.mimeType) {
+      this.mimeType = options.mimeType;
+    }
     MockMediaRecorder.lastCreatedInstance = this;
   }
 
@@ -1029,7 +1036,7 @@ class MockMediaRecorder {
   }
 }
 
-function setupMockExportEnvironment() {
+function setupMockExportEnvironment(customIsTypeSupported?: (mime: string) => boolean) {
   const origWindow = (globalThis as any).window;
   const origDocument = (globalThis as any).document;
   const origMediaRecorder = (globalThis as any).MediaRecorder;
@@ -1038,6 +1045,11 @@ function setupMockExportEnvironment() {
   const origURL = (globalThis as any).URL;
   const origAudioContext = (globalThis as any).AudioContext;
   const origSetTimeout = globalThis.setTimeout;
+  const origIsTypeSupported = MockMediaRecorder.isTypeSupported;
+
+  if (customIsTypeSupported) {
+    MockMediaRecorder.isTypeSupported = customIsTypeSupported;
+  }
 
   class MockImage {
     onload: (() => void) | null = null;
@@ -1083,6 +1095,7 @@ function setupMockExportEnvironment() {
   }) as any;
 
   return () => {
+    MockMediaRecorder.isTypeSupported = origIsTypeSupported;
     (globalThis as any).window = origWindow;
     (globalThis as any).document = origDocument;
     (globalThis as any).MediaRecorder = origMediaRecorder;
@@ -1491,6 +1504,313 @@ test('TTS-A3b TEST CASE: 16 players, 8 groups of 2, Nhận bóng mở thân ngư
     const fullResult = await fullController.promise;
     assert.ok(fullResult, 'Point 10: full-mode diagram exports successfully');
     assert.equal(fullResult.hasAudio, true, 'Point 10: full-mode diagram includes audio');
+  } finally {
+    restoreEnv();
+  }
+});
+
+// =============================================================================
+// TASK MP4-A1 TESTS: NATIVE MP4 VIDEO EXPORT & SAFE WEBM FALLBACK
+// =============================================================================
+
+test('MP4-A1: detectPreferredNativeMp4Mime tests preferred MIME ordering and unsupported handling', () => {
+  // 1. Highest priority: video/mp4;codecs=h264,aac
+  const withH264Aac = detectPreferredNativeMp4Mime((mime) =>
+    mime === 'video/mp4;codecs=h264,aac' || mime === 'video/mp4'
+  );
+  assert.equal(withH264Aac, 'video/mp4;codecs=h264,aac');
+
+  // 2. Second priority: video/mp4;codecs=avc1.42E01E,mp4a.40.2
+  const withAvc1Audio = detectPreferredNativeMp4Mime((mime) =>
+    mime === 'video/mp4;codecs=avc1.42E01E,mp4a.40.2' || mime === 'video/mp4'
+  );
+  assert.equal(withAvc1Audio, 'video/mp4;codecs=avc1.42E01E,mp4a.40.2');
+
+  // 3. Fallback priority: video/mp4
+  const withBasicMp4 = detectPreferredNativeMp4Mime((mime) => mime === 'video/mp4');
+  assert.equal(withBasicMp4, 'video/mp4');
+
+  // 4. Unsupported MP4: returns null
+  const unsupported = detectPreferredNativeMp4Mime((mime) => mime.includes('webm'));
+  assert.equal(unsupported, null);
+
+  // 5. Missing environment / no function: returns null
+  const noEnv = detectPreferredNativeMp4Mime(undefined);
+  assert.equal(noEnv, null);
+
+  // 6. Preferred candidate list order integrity
+  assert.deepEqual(PREFERRED_NATIVE_MP4_MIMES, [
+    'video/mp4;codecs=h264,aac',
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4;codecs=avc1',
+    'video/mp4;codecs=h264',
+    'video/mp4',
+  ]);
+});
+
+test('MP4-A1: selectExportFormat deterministic format selection behavior', () => {
+  const mockSupportMp4AndWebm = (mime: string) => mime.includes('webm') || mime === 'video/mp4;codecs=h264,aac';
+  const mockSupportWebmOnly = (mime: string) => mime.includes('webm');
+
+  // 1. Explicit MP4 requested and native MP4 supported
+  const mp4Ok = selectExportFormat('mp4', mockSupportMp4AndWebm);
+  assert.equal(mp4Ok.format, 'mp4');
+  assert.equal(mp4Ok.mimeType, 'video/mp4;codecs=h264,aac');
+  assert.equal(mp4Ok.nativeMp4, true);
+  assert.equal(mp4Ok.requiresTranscode, false);
+
+  // 2. Explicit MP4 requested and native MP4 unsupported: fallback to WebM with clear warning
+  const mp4Fallback = selectExportFormat('mp4', mockSupportWebmOnly);
+  assert.equal(mp4Fallback.format, 'webm');
+  assert.equal(mp4Fallback.nativeMp4, false);
+  assert.equal(mp4Fallback.requiresTranscode, true);
+  assert.ok(mp4Fallback.warning && mp4Fallback.warning.includes('WebM'));
+
+  // 3. Default export without explicit format: preserves WebM behavior unchanged
+  const defaultExport = selectExportFormat(undefined, mockSupportMp4AndWebm);
+  assert.equal(defaultExport.format, 'webm');
+  assert.equal(defaultExport.requiresTranscode, false);
+
+  // 4. Explicit WebM requested: preserves WebM
+  const webmExplicit = selectExportFormat('webm', mockSupportMp4AndWebm);
+  assert.equal(webmExplicit.format, 'webm');
+  assert.equal(webmExplicit.requiresTranscode, false);
+});
+
+test('MP4-A1: generateVideoFilename handles .mp4 and .webm extension correctly', () => {
+  // 1. Native MP4 filename
+  assert.equal(
+    generateVideoFilename('Nhận bóng mở thân người', 'mp4'),
+    'coquinho-nhan-bong-mo-than-nguoi.mp4'
+  );
+  assert.equal(
+    generateVideoFilename('Bài tập 3v3 + 2 Neutral (Kỹ năng)', 'mp4'),
+    'coquinho-bai-tap-3v3-2-neutral-ky-nang.mp4'
+  );
+
+  // 2. WebM fallback and explicit WebM filename
+  assert.equal(
+    generateVideoFilename('Nhận bóng mở thân người', 'webm'),
+    'coquinho-nhan-bong-mo-than-nguoi.webm'
+  );
+
+  // 3. Default without second argument preserves existing .webm filename
+  assert.equal(
+    generateVideoFilename('Nhận bóng mở thân người'),
+    'coquinho-nhan-bong-mo-than-nguoi.webm'
+  );
+
+  // 4. Empty and undefined inputs
+  assert.equal(generateVideoFilename('', 'mp4'), 'coquinho-giao-an-tap-luyen.mp4');
+  assert.equal(generateVideoFilename(undefined, 'mp4'), 'coquinho-giao-an-tap-luyen.mp4');
+  assert.equal(generateVideoFilename(''), 'coquinho-giao-an-tap-luyen.webm');
+});
+
+test('MP4-A1: evaluateMediaExportCapability reports mp4Native and mp4RequiresTranscode correctly', () => {
+  // 1. Browser supports native MP4: mp4Native=true, mp4RequiresTranscode=false
+  const capWithMp4 = evaluateMediaExportCapability((mime) =>
+    mime.includes('webm') || mime === 'video/mp4;codecs=h264,aac'
+  );
+  assert.equal(capWithMp4.webm, true);
+  assert.equal(capWithMp4.mp4Native, true);
+  assert.equal(capWithMp4.mp4NativeCodec, 'video/mp4;codecs=h264,aac');
+  assert.equal(capWithMp4.mp4RequiresTranscode, false);
+
+  // 2. Browser does NOT support native MP4: mp4Native=false, mp4RequiresTranscode=true
+  const capWithoutMp4 = evaluateMediaExportCapability((mime) => mime.includes('webm'));
+  assert.equal(capWithoutMp4.webm, true);
+  assert.equal(capWithoutMp4.mp4Native, false);
+  assert.equal(capWithoutMp4.mp4NativeCodec, undefined);
+  assert.equal(capWithoutMp4.mp4RequiresTranscode, true);
+});
+
+test('MP4-A1 (Test Case A): Browser supports video/mp4;codecs=h264,aac -> exports native MP4 with preserved narration audio', async () => {
+  const restoreEnv = setupMockExportEnvironment((mime: string) =>
+    mime.includes('webm') || mime === 'video/mp4;codecs=h264,aac' || mime === 'video/mp4'
+  );
+
+  try {
+    const diag = buildDefaultStructuredDiagram({
+      blockType: 'technical',
+      playerCount: 16,
+      topic: 'Nhận bóng mở thân người',
+      execution: 'p1 chuyền bóng cho p2, p2 mở góc đón bóng',
+    });
+
+    const provider: NarrationAudioProvider = async (_item: CoachingNarrationItem) => {
+      return new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+    };
+
+    const controller = exportDiagramToVideoBlob(diag, {
+      format: 'mp4',
+      includeNarration: true,
+      narrationProvider: provider,
+      exerciseName: 'Nhận bóng mở thân người',
+    });
+
+    const result = await controller.promise;
+    assert.ok(result, 'Export result must not be null');
+
+    // 1. Format and MIME verification
+    assert.equal(result.format, 'mp4', 'Result format must be mp4');
+    assert.equal(result.nativeMp4, true, 'Result nativeMp4 must be true');
+    assert.equal(result.mimeType, 'video/mp4;codecs=h264,aac', 'MediaRecorder mimeType must be native MP4');
+    assert.equal(result.blob.type, 'video/mp4;codecs=h264,aac', 'Output Blob MIME must be native MP4');
+
+    // 2. Filename verification
+    assert.ok(result.filename.endsWith('.mp4'), 'Filename must end with .mp4');
+    assert.equal(result.filename, 'coquinho-nhan-bong-mo-than-nguoi.mp4');
+
+    // 3. Narration audio preservation verification
+    assert.equal(result.hasAudio, true, 'Result hasAudio must be true');
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance, 'MediaRecorder instance must exist');
+    assert.ok(
+      recorderInstance.stream.getAudioTracks().length >= 1,
+      'MediaRecorder stream must contain narration audio track'
+    );
+    assert.ok(
+      recorderInstance.stream.getVideoTracks().length >= 1,
+      'MediaRecorder stream must contain video track'
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('MP4-A1 (Test Case B): Browser does NOT support MP4 -> capability reports mp4Native=false, mp4RequiresTranscode=true, WebM still exports normally', async () => {
+  const restoreEnv = setupMockExportEnvironment((mime: string) => mime.includes('webm'));
+
+  try {
+    const diag = buildDefaultStructuredDiagram({
+      blockType: 'technical',
+      playerCount: 16,
+      topic: 'Nhận bóng mở thân người',
+      execution: 'p1 chuyền cho p2',
+    });
+
+    const warningsCaptured: string[] = [];
+    const controller = exportDiagramToVideoBlob(diag, {
+      format: 'mp4',
+      exerciseName: 'Nhận bóng mở thân người',
+      onNarrationWarning: (warn) => {
+        warningsCaptured.push(warn);
+      },
+    });
+
+    const result = await controller.promise;
+    assert.ok(result, 'Export must succeed on WebM fallback');
+
+    // Expected fallback behavior
+    assert.equal(result.format, 'webm', 'Fallback format must be webm');
+    assert.equal(result.nativeMp4, false, 'nativeMp4 must be false');
+    assert.ok(result.mimeType.includes('webm'), 'Mime type must be webm');
+    assert.ok(result.filename.endsWith('.webm'), 'Filename must end with .webm');
+    assert.equal(result.filename, 'coquinho-nhan-bong-mo-than-nguoi.webm');
+    assert.ok(
+      warningsCaptured.some((w) => w.includes('WebM')),
+      'Clear warning must be emitted informing fallback to WebM'
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('MP4-A1 (Test Case C): Default export without MP4 request preserves existing WebM behavior unchanged', async () => {
+  const restoreEnv = setupMockExportEnvironment((mime: string) =>
+    mime.includes('webm') || mime === 'video/mp4;codecs=h264,aac'
+  );
+
+  try {
+    const diag = buildDefaultStructuredDiagram({
+      blockType: 'technical',
+      playerCount: 16,
+      topic: 'Nhận bóng mở thân người',
+      execution: 'p1 chuyền cho p2',
+    });
+
+    // Default export with no format specified
+    const controller = exportDiagramToVideoBlob(diag, {
+      exerciseName: 'Nhận bóng mở thân người',
+    });
+
+    const result = await controller.promise;
+    assert.ok(result);
+    assert.equal(result.format, 'webm', 'Default export format must remain webm');
+    assert.ok(result.filename.endsWith('.webm'), 'Default export filename must end with .webm');
+    assert.ok(result.mimeType.includes('webm'), 'Default export MIME must be webm');
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('MP4-A1: export duration and coaching freeze consistency unchanged across formats', async () => {
+  const restoreEnv = setupMockExportEnvironment((mime: string) =>
+    mime.includes('webm') || mime === 'video/mp4;codecs=h264,aac'
+  );
+
+  try {
+    const diag = buildDefaultStructuredDiagram({
+      blockType: 'technical',
+      playerCount: 16,
+      topic: 'Nhận bóng mở thân người',
+      execution: 'p1 chuyền cho p2',
+    });
+
+    const expectedDuration = calculateExportDuration(diag.animation);
+
+    // 1. WebM export duration
+    const webmController = exportDiagramToVideoBlob(diag, { format: 'webm' });
+    const webmResult = await webmController.promise;
+    assert.ok(webmResult);
+    assert.equal(webmResult.duration, expectedDuration);
+
+    // 2. Native MP4 export duration
+    const mp4Controller = exportDiagramToVideoBlob(diag, { format: 'mp4' });
+    const mp4Result = await mp4Controller.promise;
+    assert.ok(mp4Result);
+    assert.equal(mp4Result.duration, expectedDuration);
+    assert.equal(mp4Result.duration, webmResult.duration);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test('MP4-A1: native MP4 cancellation and resource cleanup', async () => {
+  const restoreEnv = setupMockExportEnvironment((mime: string) =>
+    mime.includes('webm') || mime === 'video/mp4;codecs=h264,aac'
+  );
+
+  try {
+    const diag = buildDefaultStructuredDiagram({
+      blockType: 'technical',
+      playerCount: 16,
+      topic: 'Nhận bóng mở thân người',
+      execution: 'p1 chuyền cho p2',
+    });
+
+    const provider: NarrationAudioProvider = async () => {
+      return new MockAudioBuffer({ duration: 1.5 }) as unknown as AudioBuffer;
+    };
+
+    let controllerRef: any = null;
+    const controller = exportDiagramToVideoBlob(diag, {
+      format: 'mp4',
+      narrationProvider: provider,
+      onProgress: (p) => {
+        if (p.stage === 'rendering') {
+          controllerRef.cancel();
+        }
+      },
+    });
+    controllerRef = controller;
+
+    const result = await controller.promise;
+    assert.equal(result, null, 'Cancelled export must resolve to null');
+
+    const recorderInstance = MockMediaRecorder.lastCreatedInstance;
+    assert.ok(recorderInstance);
+    assert.equal(recorderInstance.state, 'inactive', 'Recorder must be inactive after cancellation');
   } finally {
     restoreEnv();
   }

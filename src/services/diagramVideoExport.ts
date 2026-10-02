@@ -54,14 +54,27 @@ export const PREFERRED_WEBM_CODECS = [
 ] as const;
 
 /**
- * Candidate native MP4 mime types for capability detection (TASK D8B2).
+ * Candidate native MP4 mime types in preferred order (TASK D8B2 & MP4-A1).
  */
-export const MP4_CANDIDATE_MIMES = [
+export const PREFERRED_NATIVE_MP4_MIMES = [
+  'video/mp4;codecs=h264,aac',
   'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
   'video/mp4;codecs=avc1',
   'video/mp4;codecs=h264',
   'video/mp4',
 ] as const;
+
+export const MP4_CANDIDATE_MIMES = PREFERRED_NATIVE_MP4_MIMES;
+
+export type ExportVideoFormat = 'webm' | 'mp4';
+
+export interface FormatSelectionResult {
+  format: ExportVideoFormat;
+  mimeType: string;
+  nativeMp4: boolean;
+  requiresTranscode: boolean;
+  warning?: string;
+}
 
 export interface VideoExportOptions {
   fps?: number; // Default 30 FPS
@@ -72,6 +85,7 @@ export interface VideoExportOptions {
   filename?: string;
   topic?: string;
   exerciseName?: string;
+  format?: ExportVideoFormat; // TASK MP4-A1: 'webm' | 'mp4'
   onProgress?: (progress: VideoExportProgress) => void;
   // TASK TTS-A3b: Coaching Narration Audio Options
   includeNarration?: boolean;
@@ -102,6 +116,8 @@ export interface VideoExportResult {
   height: number;
   frameCount: number;
   hasAudio: boolean;
+  format?: ExportVideoFormat;
+  nativeMp4?: boolean;
 }
 
 export interface PresentationTimelineMapping {
@@ -168,15 +184,19 @@ export function slugifyTitle(title: string): string {
 
 /**
  * Generates a clean download filename for the exported drill video.
- * Example: "coquinho-nhan-bong-mo-than-nguoi.webm"
+ * Example: "coquinho-nhan-bong-mo-than-nguoi.webm" or "coquinho-nhan-bong-mo-than-nguoi.mp4"
  */
-export function generateVideoFilename(topicOrExerciseName?: string): string {
+export function generateVideoFilename(
+  topicOrExerciseName?: string,
+  format: ExportVideoFormat = 'webm'
+): string {
   const base = slugifyTitle(topicOrExerciseName || '');
   const prefix = 'coquinho';
+  const ext = format === 'mp4' ? 'mp4' : 'webm';
   if (!base) {
-    return `${prefix}-giao-an-tap-luyen.webm`;
+    return `${prefix}-giao-an-tap-luyen.${ext}`;
   }
-  return `${prefix}-${base}.webm`;
+  return `${prefix}-${base}.${ext}`;
 }
 
 /**
@@ -214,7 +234,94 @@ export function selectBestWebMCodec(
 }
 
 /**
- * Pure helper for evaluating MP4 capability and transcoding strategy (TASK D8B2).
+ * Pure helper for preferred native MP4 MIME type detection (TASK MP4-A1).
+ * Safely checks MediaRecorder.isTypeSupported against candidate order.
+ * Returns null when native MP4 recording is unavailable.
+ */
+export function detectPreferredNativeMp4Mime(
+  isTypeSupportedFn?: (mime: string) => boolean
+): string | null {
+  let checkFn = isTypeSupportedFn;
+
+  if (
+    !checkFn &&
+    typeof window !== 'undefined' &&
+    (window as any).MediaRecorder &&
+    typeof (window as any).MediaRecorder.isTypeSupported === 'function'
+  ) {
+    checkFn = (mime: string) => (window as any).MediaRecorder.isTypeSupported(mime);
+  }
+
+  if (!checkFn) {
+    return null;
+  }
+
+  for (const candidate of PREFERRED_NATIVE_MP4_MIMES) {
+    try {
+      if (checkFn(candidate)) {
+        return candidate;
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+/**
+ * Deterministic format selector (TASK MP4-A1).
+ * If user requests MP4:
+ * - native MP4 supported -> use native MP4
+ * - native MP4 unsupported -> use existing WebM for now and clearly indicate MP4 requires future transcode
+ * If normal/default export has no explicit requested format:
+ * - preserves current WebM behavior.
+ */
+export function selectExportFormat(
+  requestedFormat?: ExportVideoFormat,
+  isTypeSupportedFn?: (mime: string) => boolean
+): FormatSelectionResult {
+  let checkFn = isTypeSupportedFn;
+  if (
+    !checkFn &&
+    typeof window !== 'undefined' &&
+    (window as any).MediaRecorder &&
+    typeof (window as any).MediaRecorder.isTypeSupported === 'function'
+  ) {
+    checkFn = (mime: string) => (window as any).MediaRecorder.isTypeSupported(mime);
+  }
+
+  const nativeMp4Mime = detectPreferredNativeMp4Mime(checkFn);
+  const webmCodecResult = selectBestWebMCodec(checkFn);
+  const webmMime = webmCodecResult.mimeType || 'video/webm';
+
+  if (requestedFormat === 'mp4') {
+    if (nativeMp4Mime) {
+      return {
+        format: 'mp4',
+        mimeType: nativeMp4Mime,
+        nativeMp4: true,
+        requiresTranscode: false,
+      };
+    }
+
+    return {
+      format: 'webm',
+      mimeType: webmMime,
+      nativeMp4: false,
+      requiresTranscode: true,
+      warning: 'Trình duyệt không hỗ trợ ghi trực tiếp MP4. Đã chuyển sang định dạng WebM.',
+    };
+  }
+
+  return {
+    format: 'webm',
+    mimeType: webmMime,
+    nativeMp4: Boolean(nativeMp4Mime),
+    requiresTranscode: false,
+  };
+}
+
+/**
+ * Pure helper for evaluating MP4 capability and transcoding strategy (TASK D8B2 & MP4-A1).
  */
 export function evaluateMediaExportCapability(
   isTypeSupportedFn?: (mime: string) => boolean
@@ -233,24 +340,14 @@ export function evaluateMediaExportCapability(
   }
 
   const webmSelection = selectBestWebMCodec(checkFn);
-  let mp4Native = false;
-  let mp4NativeCodec: string | undefined;
-
-  for (const candidate of MP4_CANDIDATE_MIMES) {
-    try {
-      if (checkFn(candidate)) {
-        mp4Native = true;
-        mp4NativeCodec = candidate;
-        break;
-      }
-    } catch {}
-  }
+  const mp4Codec = detectPreferredNativeMp4Mime(checkFn);
+  const mp4Native = Boolean(mp4Codec);
 
   return {
     webm: webmSelection.supported,
     webmCodec: webmSelection.mimeType,
     mp4Native,
-    mp4NativeCodec,
+    mp4NativeCodec: mp4Codec || undefined,
     mp4RequiresTranscode: !mp4Native,
   };
 }
@@ -542,17 +639,20 @@ export function validateExportPreconditions(
     return { valid: false, error: `Tốc độ khung hình (FPS: ${fps}) phải từ 10 đến 60 FPS` };
   }
 
-  const codecResult = selectBestWebMCodec(isTypeSupportedFn);
-  if (!codecResult.supported || !codecResult.mimeType) {
-    return {
-      valid: false,
-      error: codecResult.reason || 'Trình duyệt không hỗ trợ các codec WebM cần thiết (VP9/VP8)',
-    };
+  const formatSelection = selectExportFormat(options.format, isTypeSupportedFn);
+  if (formatSelection.format === 'webm') {
+    const codecResult = selectBestWebMCodec(isTypeSupportedFn);
+    if (!codecResult.supported || !codecResult.mimeType) {
+      return {
+        valid: false,
+        error: codecResult.reason || 'Trình duyệt không hỗ trợ các codec WebM cần thiết (VP9/VP8)',
+      };
+    }
   }
 
   return {
     valid: true,
-    mimeType: codecResult.mimeType,
+    mimeType: formatSelection.mimeType,
     totalDuration,
   };
 }
@@ -1002,8 +1102,13 @@ export function exportDiagramToVideoBlob(
     const height = options.height ?? 720;
     const totalDuration = validation.totalDuration || calculateExportDuration(animation);
     const totalFrames = Math.max(1, Math.round(totalDuration * fps));
-    const mimeType = validation.mimeType || 'video/webm';
+    const formatSelection = selectExportFormat(options.format);
+    const mimeType = validation.mimeType || formatSelection.mimeType || 'video/webm';
     const videoBitsPerSecond = options.videoBitsPerSecond ?? DEFAULT_VIDEO_BITS_PER_SECOND;
+
+    if (formatSelection.warning) {
+      options.onNarrationWarning?.(formatSelection.warning);
+    }
 
     let narrationController: NarrationAudioController | null = null;
     let effectiveAudioTrack: MediaStreamTrack | null = options.audioTrack ?? null;
@@ -1114,7 +1219,16 @@ export function exportDiagramToVideoBlob(
       }
     };
 
-    const filename = options.filename || generateVideoFilename(options.exerciseName || options.topic);
+    let filename = options.filename;
+    if (!filename) {
+      filename = generateVideoFilename(options.exerciseName || options.topic, formatSelection.format);
+    } else {
+      if (formatSelection.format === 'mp4' && filename.endsWith('.webm')) {
+        filename = filename.replace(/\.webm$/, '.mp4');
+      } else if (formatSelection.format === 'webm' && filename.endsWith('.mp4')) {
+        filename = filename.replace(/\.mp4$/, '.webm');
+      }
+    }
 
     const recorderStoppedPromise = new Promise<Blob | null>((res) => {
       recorder.onstop = () => {
@@ -1243,7 +1357,7 @@ export function exportDiagramToVideoBlob(
           stage: 'completed',
         });
 
-        // 7. Return rich export result metadata (TASK D8B2 & TTS-A3b)
+        // 7. Return rich export result metadata (TASK D8B2 & TTS-A3b & MP4-A1)
         const exportResult: VideoExportResult = {
           blob: resultBlob,
           mimeType: recorder.mimeType || mimeType,
@@ -1254,6 +1368,8 @@ export function exportDiagramToVideoBlob(
           height,
           frameCount: totalFrames + 1,
           hasAudio,
+          format: formatSelection.format,
+          nativeMp4: formatSelection.nativeMp4,
         };
 
         resolve(exportResult);
@@ -1298,7 +1414,17 @@ export function exportAndDownloadDiagramVideo(
   diagram: StructuredDrillDiagram,
   options: VideoExportOptions = {}
 ): { cancel: () => void; promise: Promise<boolean> } {
-  const filename = options.filename || generateVideoFilename(options.exerciseName || options.topic);
+  const formatSelection = selectExportFormat(options.format);
+  let filename = options.filename;
+  if (!filename) {
+    filename = generateVideoFilename(options.exerciseName || options.topic, formatSelection.format);
+  } else {
+    if (formatSelection.format === 'mp4' && filename.endsWith('.webm')) {
+      filename = filename.replace(/\.webm$/, '.mp4');
+    } else if (formatSelection.format === 'webm' && filename.endsWith('.mp4')) {
+      filename = filename.replace(/\.mp4$/, '.webm');
+    }
+  }
   const controller = exportDiagramToVideoBlob(diagram, { ...options, filename });
 
   const promise = controller.promise

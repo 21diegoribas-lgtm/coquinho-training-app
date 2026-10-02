@@ -29,7 +29,9 @@ import {
   updateSeekTriggerState,
 } from '../services/structuredDiagram';
 import {
+  evaluateMediaExportCapability,
   exportAndDownloadDiagramVideo,
+  ExportVideoFormat,
   isBrowserVideoExportSupported,
 } from '../services/diagramVideoExport';
 
@@ -227,7 +229,15 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
   const [exportStatusText, setExportStatusText] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportWarning, setExportWarning] = useState<string | null>(null);
+  const [selectedFormat, setSelectedFormat] = useState<ExportVideoFormat>('webm');
+  const [exportCapability, setExportCapability] = useState<{ mp4Native: boolean }>({ mp4Native: false });
   const exportControllerRef = useRef<{ cancel: () => void } | null>(null);
+
+  // Khởi tạo năng lực xuất video của trình duyệt
+  useEffect(() => {
+    const cap = evaluateMediaExportCapability();
+    setExportCapability({ mp4Native: cap.mp4Native });
+  }, []);
 
   // Dọn dẹp export controller khi unmount
   useEffect(() => {
@@ -247,7 +257,7 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
 
     const support = isBrowserVideoExportSupported();
     if (!support.supported) {
-      setExportError(support.reason || 'Trình duyệt chưa hỗ trợ quay video WebM');
+      setExportError(support.reason || 'Trình duyệt chưa hỗ trợ quay video');
       setTimeout(() => setExportError(null), 3500);
       return;
     }
@@ -256,6 +266,7 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
     setExportPercent(0);
 
     const controller = exportAndDownloadDiagramVideo(diagram, {
+      format: selectedFormat,
       exerciseName: exerciseName || topic,
       topic,
       onNarrationStatus: (status) => {
@@ -992,16 +1003,35 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
                 </button>
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={handleStartExport}
-                className="flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 active:scale-95 px-2 py-0.5 text-[11px] font-medium text-amber-300 hover:text-amber-200 transition-all cursor-pointer"
-                title="Xuất video mô phỏng bài tập (.webm)"
-              >
-                <Video className="h-3 w-3 text-amber-400" />
-                <span className="hidden sm:inline">Xuất video</span>
-                <span className="sm:hidden">Video</span>
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={handleStartExport}
+                  className="flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 active:scale-95 px-2 py-0.5 text-[11px] font-medium text-amber-300 hover:text-amber-200 transition-all cursor-pointer"
+                  title={`Xuất video mô phỏng bài tập (.${selectedFormat})`}
+                >
+                  <Video className="h-3 w-3 text-amber-400" />
+                  <span className="hidden sm:inline">Xuất video</span>
+                  <span className="sm:hidden">Video</span>
+                </button>
+                <select
+                  value={selectedFormat}
+                  onChange={(e) => setSelectedFormat(e.target.value as ExportVideoFormat)}
+                  className="bg-stone-900/80 text-[10px] text-amber-200/90 rounded px-1 py-0.5 border border-white/20 focus:outline-hidden cursor-pointer"
+                  aria-label="Định dạng video"
+                  title="Chọn định dạng video"
+                >
+                  <option value="webm" className="bg-stone-900 text-white">WebM</option>
+                  <option
+                    value="mp4"
+                    disabled={!exportCapability.mp4Native}
+                    className="bg-stone-900 text-white"
+                    title={exportCapability.mp4Native ? 'Xuất MP4 trực tiếp' : 'MP4 cần chuyển đổi'}
+                  >
+                    {exportCapability.mp4Native ? 'MP4' : 'MP4 cần chuyển đổi'}
+                  </option>
+                </select>
+              </div>
             )}
 
             {/* Cảnh báo âm thanh giọng đọc nếu có (TASK TTS-A3b) */}
