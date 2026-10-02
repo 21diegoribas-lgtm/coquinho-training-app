@@ -1326,6 +1326,139 @@ export function shouldTriggerCoachingMoment(
 }
 
 /**
+ * Reconstructs the deterministic orientation for a player at a given animation time.
+ * - If no coaching moments for this player before currentTime: returns player's base orientation.
+ * - If an active coaching moment is currently focusing this player:
+ *   smoothly rotates from the player's previous orientation (prior to this moment) to target angle.
+ * - If between coaching moments or during normal playback / scrubbing:
+ *   retains the latest completed coaching moment's orientation for this player.
+ * - Avoids snapping back to default between consecutive moments on the same player.
+ */
+export function reconstructPlayerOrientation(
+  playerId: string,
+  currentTime: number,
+  baseOrientation?: number,
+  coachingMoments?: DiagramCoachingMoment[],
+  activeMoment?: DiagramCoachingMoment | null,
+  orientationProgress?: number
+): number | undefined {
+  if (!coachingMoments || !Array.isArray(coachingMoments) || coachingMoments.length === 0) {
+    return baseOrientation;
+  }
+
+  // Filter moments for this player that specify orientation, sorted chronologically
+  const playerMoments = coachingMoments
+    .filter((m) => m && m.playerId === playerId && typeof m.orientation === 'number' && Number.isFinite(m.orientation))
+    .sort((a, b) => a.time - b.time);
+
+  if (playerMoments.length === 0) {
+    return baseOrientation;
+  }
+
+  // 1. If player is the active coaching moment focus
+  if (activeMoment && activeMoment.playerId === playerId && typeof activeMoment.orientation === 'number') {
+    // Find the latest moment for this player strictly prior to this active moment's trigger time
+    const prevMoments = playerMoments.filter(
+      (m) => m.id !== activeMoment.id && m.time < activeMoment.time
+    );
+    const prevMoment = prevMoments.length > 0 ? prevMoments[prevMoments.length - 1] : undefined;
+    const startAngle = prevMoment?.orientation ?? baseOrientation ?? 0;
+    const targetAngle = activeMoment.orientation;
+    const progress = typeof orientationProgress === 'number'
+      ? Math.max(0, Math.min(1, orientationProgress))
+      : 1;
+    return Math.round(startAngle + (targetAngle - startAngle) * progress);
+  }
+
+  // 2. Normal playback / post-moment / seek:
+  // Find the latest completed moment for this player whose time <= currentTime
+  const completedMoments = playerMoments.filter((m) => m.time <= currentTime);
+  if (completedMoments.length === 0) {
+    return baseOrientation;
+  }
+
+  return completedMoments[completedMoments.length - 1].orientation;
+}
+
+export interface TimelineMarker {
+  id: string;
+  time: number;
+  pct: number; // 0 to 100
+  title: string;
+  state: 'future' | 'active' | 'completed';
+}
+
+/**
+ * Pure helper to compute chronological, unique timeline markers for coaching moments.
+ * If coachingSequence is absent, returns [] (preserving D6/D7B compatibility).
+ * If coachingSequence is present, maps valid sequence moments to timeline percentage.
+ */
+export function getSequenceTimelineMarkers(
+  animation?: DiagramAnimation | null,
+  currentTime: number = 0,
+  activeMomentId?: string | null,
+  triggeredIds?: Set<string>
+): TimelineMarker[] {
+  if (!animation || typeof animation.duration !== 'number' || animation.duration <= 0) {
+    return [];
+  }
+
+  // D7B compatibility: if coachingSequence is absent, do not render markers
+  if (!animation.coachingSequence || !Array.isArray(animation.coachingSequence.momentIds)) {
+    return [];
+  }
+
+  const moments = Array.isArray(animation.coachingMoments) ? animation.coachingMoments : [];
+  const momentMap = new Map<string, DiagramCoachingMoment>();
+  moments.forEach((m) => {
+    if (m && typeof m.id === 'string' && m.id.trim()) {
+      momentMap.set(m.id.trim(), m);
+    }
+  });
+
+  const validMoments: DiagramCoachingMoment[] = [];
+  const seenIds = new Set<string>();
+
+  for (const rawId of animation.coachingSequence.momentIds) {
+    if (typeof rawId !== 'string') continue;
+    const cleanId = rawId.trim();
+    if (!cleanId || seenIds.has(cleanId)) continue;
+    const found = momentMap.get(cleanId);
+    if (!found) continue;
+    seenIds.add(cleanId);
+    validMoments.push(found);
+  }
+
+  if (validMoments.length === 0) {
+    return [];
+  }
+
+  // Sort chronologically
+  validMoments.sort((a, b) => a.time - b.time);
+
+  const duration = animation.duration;
+  return validMoments.map((m) => {
+    const rawPct = (m.time / duration) * 100;
+    const pct = Math.max(0, Math.min(100, Math.round(rawPct * 10) / 10));
+
+    let state: 'future' | 'active' | 'completed' = 'future';
+    if (activeMomentId && activeMomentId === m.id) {
+      state = 'active';
+    } else if (triggeredIds?.has(m.id) || (!activeMomentId && currentTime > m.time + 0.05)) {
+      state = 'completed';
+    }
+
+    return {
+      id: m.id,
+      time: m.time,
+      pct,
+      title: m.title,
+      state,
+    };
+  });
+}
+
+/**
  * Builds semantically grounded coaching moments for an animation sequence.
  * Targets the receiving player immediately before or at reception.
  */
@@ -1631,14 +1764,12 @@ export function interpolateAnimationState(
 
   const updatedPlayers = basePlayers.map((p) => {
     const pos = playerPositions.get(p.id);
-    let orientation = p.orientation;
-    if (anim.coachingMoments && Array.isArray(anim.coachingMoments)) {
-      for (const m of anim.coachingMoments) {
-        if (m.playerId === p.id && m.orientation !== undefined && currentTime >= m.time) {
-          orientation = m.orientation;
-        }
-      }
-    }
+    const orientation = reconstructPlayerOrientation(
+      p.id,
+      currentTime,
+      p.orientation,
+      anim.coachingMoments
+    );
     return pos
       ? { ...p, x: Math.round(pos.x * 100) / 100, y: Math.round(pos.y * 100) / 100, orientation }
       : { ...p, orientation };

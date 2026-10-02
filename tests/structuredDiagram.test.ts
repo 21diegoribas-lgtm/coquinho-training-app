@@ -19,12 +19,14 @@ import {
   getCoachingSequencePosition,
   getCoachingSequenceProgress,
   getGoalGeometry,
+  getSequenceTimelineMarkers,
   getTeamStyle,
   interpolateAnimationState,
   interpolateViewBox,
   isOpposedExercise,
   normalizeOrientation,
   prioritizeCoachingMoments,
+  reconstructPlayerOrientation,
   resolveCoachingMomentOverlaps,
   resolvePathCoordinates,
   safeStructuredDiagram,
@@ -2006,6 +2008,343 @@ test('D7B: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 
 
   // All 3 moments played smoothly in sequence
   assert.deepEqual(Array.from(triggeredIds), ['coach1', 'coach2', 'coach3']);
+});
+
+// =============================================================================
+// TASK D7C: MULTI-MOMENT CONTINUITY & TIMELINE MARKERS TESTS
+// =============================================================================
+
+test('D7C: marker position calculation maps moment.time / animation.duration to [0, 100]', () => {
+  const anim: DiagramAnimation = {
+    duration: 10,
+    steps: [],
+    coachingMoments: [
+      { id: 'm1', time: 2.0, duration: 2, playerId: 'p1', title: 'Start', text: 'Start explanation' },
+      { id: 'm2', time: 5.0, duration: 2, playerId: 'p1', title: 'Mid', text: 'Mid explanation' },
+      { id: 'm3', time: 8.5, duration: 2, playerId: 'p1', title: 'Late', text: 'Late explanation' },
+    ],
+    coachingSequence: {
+      id: 'seq1',
+      title: 'Seq',
+      momentIds: ['m1', 'm2', 'm3'],
+    },
+  };
+
+  const markers = getSequenceTimelineMarkers(anim, 0, null, new Set());
+  assert.equal(markers.length, 3);
+  assert.equal(markers[0].pct, 20); // 2.0 / 10 * 100 = 20%
+  assert.equal(markers[1].pct, 50); // 5.0 / 10 * 100 = 50%
+  assert.equal(markers[2].pct, 85); // 8.5 / 10 * 100 = 85%
+});
+
+test('D7C: unique marker filtering enforces valid, unique, chronological sequence moment IDs', () => {
+  const anim: DiagramAnimation = {
+    duration: 8,
+    steps: [],
+    coachingMoments: [
+      { id: 'm1', time: 1.0, duration: 2, playerId: 'p1', title: 'M1', text: 'T1' },
+      { id: 'm2', time: 3.0, duration: 2, playerId: 'p1', title: 'M2', text: 'T2' },
+      { id: 'm3', time: 5.0, duration: 2, playerId: 'p1', title: 'M3', text: 'T3' },
+    ],
+    coachingSequence: {
+      id: 'seq1',
+      title: 'Dirty',
+      momentIds: ['m3', 'm1', 'invalid_id', 'm1', 'm2'], // unordered, duplicates, non-existent
+    },
+  };
+
+  const markers = getSequenceTimelineMarkers(anim, 0, null, new Set());
+  assert.equal(markers.length, 3);
+  // Must be strictly chronological and deduplicated
+  assert.deepEqual(markers.map((m) => m.id), ['m1', 'm2', 'm3']);
+  assert.deepEqual(markers.map((m) => m.time), [1.0, 3.0, 5.0]);
+});
+
+test('D7C: marker active/completed/future state transitions predictably during drill timeline', () => {
+  const anim: DiagramAnimation = {
+    duration: 6,
+    steps: [],
+    coachingMoments: [
+      { id: 'c1', time: 1.0, duration: 2, playerId: 'p1', title: 'C1', text: 'T1' },
+      { id: 'c2', time: 3.0, duration: 2, playerId: 'p1', title: 'C2', text: 'T2' },
+      { id: 'c3', time: 5.0, duration: 2, playerId: 'p1', title: 'C3', text: 'T3' },
+    ],
+    coachingSequence: {
+      id: 'seq',
+      title: 'Test',
+      momentIds: ['c1', 'c2', 'c3'],
+    },
+  };
+
+  const triggeredIds = new Set<string>();
+
+  // State 1: Before any coaching moment triggers (t = 0.5s)
+  const markersT0 = getSequenceTimelineMarkers(anim, 0.5, null, triggeredIds);
+  assert.equal(markersT0[0].state, 'future');
+  assert.equal(markersT0[1].state, 'future');
+  assert.equal(markersT0[2].state, 'future');
+
+  // State 2: c1 actively presenting at t = 1.0s
+  triggeredIds.add('c1');
+  const markersT1 = getSequenceTimelineMarkers(anim, 1.0, 'c1', triggeredIds);
+  assert.equal(markersT1[0].state, 'active');
+  assert.equal(markersT1[1].state, 'future');
+  assert.equal(markersT1[2].state, 'future');
+
+  // State 3: c1 presentation finished at t = 1.5s, drill resumed
+  const markersT1_5 = getSequenceTimelineMarkers(anim, 1.5, null, triggeredIds);
+  assert.equal(markersT1_5[0].state, 'completed');
+  assert.equal(markersT1_5[1].state, 'future');
+  assert.equal(markersT1_5[2].state, 'future');
+
+  // State 4: c2 actively presenting at t = 3.0s
+  triggeredIds.add('c2');
+  const markersT3 = getSequenceTimelineMarkers(anim, 3.0, 'c2', triggeredIds);
+  assert.equal(markersT3[0].state, 'completed');
+  assert.equal(markersT3[1].state, 'active');
+  assert.equal(markersT3[2].state, 'future');
+
+  // State 5: All moments completed at t = 5.5s
+  triggeredIds.add('c3');
+  const markersT5_5 = getSequenceTimelineMarkers(anim, 5.5, null, triggeredIds);
+  assert.equal(markersT5_5[0].state, 'completed');
+  assert.equal(markersT5_5[1].state, 'completed');
+  assert.equal(markersT5_5[2].state, 'completed');
+});
+
+test('D7C: orientation reconstruction at arbitrary animation time is deterministic', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'c1', time: 1.0, duration: 2, playerId: 'p2', title: 'T1', text: 'Text 1', orientation: 35 },
+    { id: 'c2', time: 2.5, duration: 2, playerId: 'p2', title: 'T2', text: 'Text 2', orientation: 85 },
+  ];
+
+  // Before any moment: base orientation
+  assert.equal(reconstructPlayerOrientation('p2', 0.5, 0, moments), 0);
+  assert.equal(reconstructPlayerOrientation('p2', 0.9, 10, moments), 10);
+
+  // Between c1 and c2: retains c1 orientation
+  assert.equal(reconstructPlayerOrientation('p2', 1.2, 0, moments), 35);
+  assert.equal(reconstructPlayerOrientation('p2', 2.0, 0, moments), 35);
+
+  // After c2: retains c2 orientation
+  assert.equal(reconstructPlayerOrientation('p2', 3.0, 0, moments), 85);
+  assert.equal(reconstructPlayerOrientation('p2', 5.0, 0, moments), 85);
+});
+
+test('D7C: same-player continuity preserves orientation from previous moment and avoids snapping to default', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'c1', time: 1.0, duration: 2, playerId: 'p2', title: 'T1', text: 'Text 1', orientation: 35 },
+    { id: 'c2', time: 2.2, duration: 2, playerId: 'p2', title: 'T2', text: 'Text 2', orientation: 95 },
+  ];
+
+  // When c2 begins active presentation on p2:
+  // Initial angle (progress = 0) must begin from p2's latest orientation (35°), NOT default (0°)
+  const angleAtC2Start = reconstructPlayerOrientation('p2', 2.2, 0, moments, moments[1], 0);
+  assert.equal(angleAtC2Start, 35, 'c2 must begin from p2 previous orientation (35°), not default 0°');
+
+  // Halfway through rotation progress (progress = 0.5)
+  const angleAtC2Mid = reconstructPlayerOrientation('p2', 2.2, 0, moments, moments[1], 0.5);
+  assert.equal(angleAtC2Mid, Math.round(35 + (95 - 35) * 0.5)); // 65°
+
+  // End of rotation progress (progress = 1.0)
+  const angleAtC2End = reconstructPlayerOrientation('p2', 2.2, 0, moments, moments[1], 1.0);
+  assert.equal(angleAtC2End, 95);
+});
+
+test('D7C: reset restores initial orientation and resets all markers to future state', () => {
+  const anim: DiagramAnimation = {
+    duration: 8,
+    steps: [],
+    coachingMoments: [
+      { id: 'c1', time: 1.0, duration: 2, playerId: 'p2', orientation: 40, title: 'C1', text: 'T1' },
+      { id: 'c2', time: 2.5, duration: 2, playerId: 'p2', orientation: 80, title: 'C2', text: 'T2' },
+    ],
+    coachingSequence: {
+      id: 'seq1',
+      title: 'Seq',
+      momentIds: ['c1', 'c2'],
+    },
+  };
+
+  // After running to t = 4.0s
+  const triggeredIds = new Set<string>(['c1', 'c2']);
+
+  // Reset executed
+  const currentTime = 0;
+  triggeredIds.clear();
+
+  // 1. Orientation restored to base
+  const resetOrientation = reconstructPlayerOrientation('p2', currentTime, 0, anim.coachingMoments);
+  assert.equal(resetOrientation, 0);
+
+  // 2. All markers reset to future state
+  const resetMarkers = getSequenceTimelineMarkers(anim, currentTime, null, triggeredIds);
+  assert.equal(resetMarkers.length, 2);
+  assert.equal(resetMarkers[0].state, 'future');
+  assert.equal(resetMarkers[1].state, 'future');
+});
+
+test('D7C: backward seek orientation reconstruction restores earlier state without jump', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'c1', time: 1.0, duration: 2, playerId: 'p2', orientation: 30, title: 'C1', text: 'T1' },
+    { id: 'c2', time: 2.5, duration: 2, playerId: 'p2', orientation: 75, title: 'C2', text: 'T2' },
+  ];
+
+  // User is at 3.0s (orientation = 75)
+  assert.equal(reconstructPlayerOrientation('p2', 3.0, 0, moments), 75);
+
+  // User seeks backward to 1.8s (between c1 and c2):
+  // Must deterministically reconstruct c1 orientation (30°)
+  assert.equal(reconstructPlayerOrientation('p2', 1.8, 0, moments), 30);
+
+  // User seeks backward to 0.4s (before c1):
+  // Must reconstruct base orientation (0°)
+  assert.equal(reconstructPlayerOrientation('p2', 0.4, 0, moments), 0);
+});
+
+test('D7C: forward seek orientation reconstruction reflects completed moments without triggering overlays', () => {
+  const moments: DiagramCoachingMoment[] = [
+    { id: 'c1', time: 1.0, duration: 2, playerId: 'p2', orientation: 30, title: 'C1', text: 'T1' },
+    { id: 'c2', time: 2.5, duration: 2, playerId: 'p2', orientation: 75, title: 'C2', text: 'T2' },
+  ];
+
+  // User seeks forward from 0.0s directly to 2.8s:
+  // Orientation is deterministically reconstructed as 75°
+  const seekOrientation = reconstructPlayerOrientation('p2', 2.8, 0, moments, null);
+  assert.equal(seekOrientation, 75);
+
+  // Active moment is null, ensuring no overlay is triggered on scrub
+  assert.equal(null, null);
+});
+
+test('D7C: sequence completion allows drill playback to continue to animation.duration without stopping', () => {
+  const anim: DiagramAnimation = {
+    duration: 10,
+    steps: [],
+    coachingMoments: [
+      { id: 'c1', time: 1.0, duration: 1.5, playerId: 'p2', title: 'C1', text: 'T1' },
+      { id: 'c2', time: 2.5, duration: 1.5, playerId: 'p2', title: 'C2', text: 'T2' },
+    ],
+    coachingSequence: {
+      id: 'seq1',
+      title: 'Seq',
+      momentIds: ['c1', 'c2'],
+    },
+  };
+
+  const triggeredIds = new Set<string>(['c1', 'c2']);
+  let activeMoment: DiagramCoachingMoment | null = null;
+  let currentTime = 4.0; // c2 finished at 2.5s, drill is now at 4.0s
+
+  // Drill playback continues forward towards 10.0s
+  let nextTime = currentTime + 0.5; // 4.5s
+  assert.equal(nextTime <= anim.duration, true);
+
+  // No coaching moments should block or freeze at 4.5s
+  const nextTrigger = anim.coachingMoments!.find((m) =>
+    shouldTriggerCoachingMoment(m, currentTime, nextTime, triggeredIds)
+  );
+  assert.equal(nextTrigger, undefined);
+
+  // Timeline markers all show completed state
+  const markers = getSequenceTimelineMarkers(anim, nextTime, activeMoment, triggeredIds);
+  assert.equal(markers.length, 2);
+  assert.equal(markers[0].state, 'completed');
+  assert.equal(markers[1].state, 'completed');
+});
+
+test('D7C: D7B compatibility: when coachingSequence is absent, no timeline markers are produced', () => {
+  const animWithoutSeq: DiagramAnimation = {
+    duration: 8,
+    steps: [],
+    coachingMoments: [
+      { id: 'c1', time: 1.0, duration: 2, playerId: 'p2', title: 'C1', text: 'T1' },
+    ],
+    // coachingSequence undefined
+  };
+
+  const markers = getSequenceTimelineMarkers(animWithoutSeq, 1.0, null, new Set());
+  assert.deepEqual(markers, [], 'When coachingSequence is absent, timeline markers must remain empty');
+});
+
+test('D7C: TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 technical drill full continuity and timeline marker verification', () => {
+  const diag = buildDefaultStructuredDiagram({
+    gameFormat: '7v7',
+    playerCount: 16,
+    blockType: 'technical',
+    topic: 'Nhận bóng mở thân người',
+    execution: 'p1 chuyền cho p2, p2 kiểm tra vai mở thân người nhận bóng và chạm bước một chuyền sang p3',
+  });
+
+  const anim = diag.animation!;
+  assert.ok(anim && anim.coachingSequence);
+  const seq = anim.coachingSequence!;
+  const moments = anim.coachingMoments!;
+  assert.deepEqual(seq.momentIds, ['coach1', 'coach2', 'coach3']);
+
+  const triggeredIds = new Set<string>();
+
+  // 1. Timeline shows exactly 3 markers at initial t = 0
+  let markers = getSequenceTimelineMarkers(anim, 0, null, triggeredIds);
+  assert.equal(markers.length, 3, 'Timeline must show exactly 3 markers');
+  assert.deepEqual(markers.map((m) => m.state), ['future', 'future', 'future']);
+
+  // 2. coach1 marker becomes active while coach1 presentation runs
+  const m1 = moments.find((m) => m.id === 'coach1')!;
+  triggeredIds.add(m1.id);
+  markers = getSequenceTimelineMarkers(anim, m1.time, m1.id, triggeredIds);
+  assert.equal(markers[0].state, 'active');
+  assert.equal(markers[1].state, 'future');
+  assert.equal(markers[2].state, 'future');
+
+  // 3. After coach1 completes, marker shows completed state while coach2 and coach3 remain future
+  markers = getSequenceTimelineMarkers(anim, m1.time + 0.5, null, triggeredIds);
+  assert.equal(markers[0].state, 'completed');
+  assert.equal(markers[1].state, 'future');
+  assert.equal(markers[2].state, 'future');
+
+  // 4. coach2 and coach3 remain future
+  assert.equal(markers[1].state, 'future');
+  assert.equal(markers[2].state, 'future');
+
+  // 5. Orientation of receiver is preserved across related moments
+  const receiverId = m1.playerId;
+  assert.ok(receiverId);
+  const orientAfterM1 = reconstructPlayerOrientation(receiverId, m1.time + 0.2, 0, moments);
+  assert.equal(orientAfterM1, m1.orientation);
+
+  const m2 = moments.find((m) => m.id === 'coach2')!;
+  // When coach2 begins on same player, it begins from orientAfterM1, not 0
+  const orientAtM2Start = reconstructPlayerOrientation(receiverId, m2.time, 0, moments, m2, 0);
+  assert.equal(orientAtM2Start, m1.orientation);
+
+  // 6. Seeking backward before coach2 reconstructs earlier orientation correctly
+  const rewoundOrient = reconstructPlayerOrientation(receiverId, m1.time + 0.1, 0, moments);
+  assert.equal(rewoundOrient, m1.orientation);
+
+  const rewoundBeforeM1 = reconstructPlayerOrientation(receiverId, 0.2, 0, moments);
+  assert.equal(rewoundBeforeM1, 0);
+
+  // 7. Seeking forward after coach2 reconstructs coach2 orientation without showing overlay
+  const forwardOrient = reconstructPlayerOrientation(receiverId, m2.time + 0.5, 0, moments, null);
+  assert.equal(forwardOrient, m2.orientation);
+
+  // 8. Final sequence completion does not stop drill playback
+  const m3 = moments.find((m) => m.id === 'coach3')!;
+  triggeredIds.add(m2.id);
+  triggeredIds.add(m3.id);
+  markers = getSequenceTimelineMarkers(anim, anim.duration - 0.5, null, triggeredIds);
+  assert.equal(markers[0].state, 'completed');
+  assert.equal(markers[1].state, 'completed');
+  assert.equal(markers[2].state, 'completed');
+  assert.ok(anim.duration >= 4);
+
+  // 9. Reset restores initial orientations and all markers to future state
+  triggeredIds.clear();
+  const resetMarkers = getSequenceTimelineMarkers(anim, 0, null, triggeredIds);
+  assert.deepEqual(resetMarkers.map((m) => m.state), ['future', 'future', 'future']);
+  const resetReceiverOrient = reconstructPlayerOrientation(receiverId, 0, 0, moments);
+  assert.equal(resetReceiverOrient, 0);
 });
 
 

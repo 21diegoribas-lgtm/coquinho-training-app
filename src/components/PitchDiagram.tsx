@@ -16,9 +16,11 @@ import {
   getCoachingPhaseState,
   getCoachingSequenceProgress,
   getGoalGeometry,
+  getSequenceTimelineMarkers,
   getTeamStyle,
   interpolateAnimationState,
   interpolateViewBox,
+  reconstructPlayerOrientation,
   resolvePathCoordinates,
   shouldTriggerCoachingMoment,
   updateSeekTriggerState,
@@ -243,6 +245,16 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
       effectiveAnimation.coachingMoments
     );
   }, [activeCoachingMoment, effectiveAnimation]);
+
+  // Sequence timeline markers (TASK D7C)
+  const timelineMarkers = useMemo(() => {
+    return getSequenceTimelineMarkers(
+      effectiveAnimation,
+      currentTime,
+      activeCoachingMoment?.id,
+      triggeredMomentsRef.current
+    );
+  }, [effectiveAnimation, currentTime, activeCoachingMoment]);
 
   // Dynamic Camera Focus ViewBox during coaching moment with smooth ease-in, hold, ease-out (TASK D6)
   const cameraViewBox = useMemo(() => {
@@ -621,13 +633,15 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
               const isHighlighted = highlightPlayerId === p.id || (isCoachingFocus && activeCoachingMoment?.highlight);
               const highlightOpacity = isCoachingFocus && phaseState ? phaseState.highlightOpacity : 1;
 
-              let playerOrientation = p.orientation;
-              if (isCoachingFocus && activeCoachingMoment?.orientation !== undefined) {
-                const targetAngle = activeCoachingMoment.orientation;
-                const initialAngle = p.orientation ?? 0;
-                const progress = phaseState ? phaseState.orientationProgress : 1;
-                playerOrientation = Math.round(initialAngle + (targetAngle - initialAngle) * progress);
-              }
+              // Orientation continuity across multi-action coaching moments (TASK D7C)
+              const playerOrientation = reconstructPlayerOrientation(
+                p.id,
+                currentTime,
+                p.orientation,
+                effectiveAnimation?.coachingMoments,
+                isCoachingFocus ? activeCoachingMoment : null,
+                phaseState ? phaseState.orientationProgress : 1
+              );
 
               return (
                 <g
@@ -791,19 +805,44 @@ const StructuredPitchDiagramView: React.FC<StructuredViewProps> = ({
               <span className="text-white/40">/</span>
               <span>{effectiveAnimation.duration.toFixed(1)}s</span>
             </div>
-            <input
-              type="range"
-              min={0}
-              max={effectiveAnimation.duration}
-              step={0.05}
-              value={currentTime}
-              onChange={(e) => {
-                const val = parseFloat(e.target.value);
-                handleSeek(val);
-              }}
-              className="w-14 sm:w-20 h-1 accent-[#38bdf8] bg-white/20 rounded cursor-pointer"
-              aria-label="Thanh trượt thời gian mô phỏng"
-            />
+            <div className="relative flex items-center w-16 sm:w-24 h-4">
+              <input
+                type="range"
+                min={0}
+                max={effectiveAnimation.duration}
+                step={0.05}
+                value={currentTime}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  handleSeek(val);
+                }}
+                className="w-full h-1 accent-[#38bdf8] bg-white/20 rounded cursor-pointer z-10"
+                aria-label="Thanh trượt thời gian mô phỏng"
+              />
+              {/* Sequence Timeline Markers (TASK D7C) */}
+              {timelineMarkers.map((marker) => {
+                const isActive = marker.state === 'active';
+                const isCompleted = marker.state === 'completed';
+
+                let markerStyle = 'bg-white/40 border-stone-600/60';
+                if (isActive) {
+                  markerStyle = 'bg-amber-400 border-white scale-125 shadow-[0_0_4px_rgba(251,191,36,0.85)]';
+                } else if (isCompleted) {
+                  markerStyle = 'bg-amber-400/90 border-stone-900/60';
+                }
+
+                return (
+                  <span
+                    key={marker.id}
+                    data-testid={`timeline-marker-${marker.id}`}
+                    data-marker-state={marker.state}
+                    style={{ left: `${marker.pct}%` }}
+                    className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full border pointer-events-none transition-all duration-150 z-20 ${markerStyle}`}
+                    title={`Điểm HLV: ${marker.title}`}
+                  />
+                );
+              })}
+            </div>
           </div>
         )}
 
