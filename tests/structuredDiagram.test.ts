@@ -4,6 +4,7 @@ import {
   applyPlayerSpacingSafety,
   buildCoachingSequence,
   buildDefaultStructuredDiagram,
+  buildRepresentativePairAnimation,
   buildRepresentativePairDiagram,
   buildSemanticAnimation,
   buildSemanticCoachingMoments,
@@ -65,12 +66,19 @@ import { generateRealisticFootballPlan } from '../server';
 import { buildLocalFallbackPlan } from '../src/services/trainingPlanService';
 import { sanitizeGeminiPlan } from '../src/services/planValidation';
 import {
+  mapPresentationTimeToTimeline,
+  renderDiagramFrameToSvgString,
+} from '../src/services/diagramVideoExport';
+import {
+  BallDribbleAction,
+  BallPassAction,
   DiagramAnimation,
   DiagramAnimationStep,
   DiagramCoachingMoment,
   DiagramCoachingSequence,
   DiagramPlayer,
   DiagramRepresentation,
+  PlayerMoveAction,
   SemanticCoachingEvent,
   StructuredDrillDiagram,
 } from '../src/types/session';
@@ -3863,6 +3871,284 @@ test('REP-A REGRESSION: full diagrams remain unchanged for opposed technical, ro
   });
   assert.equal(fullPairs.players.length, 16, 'Full pairs mode must retain full 16 players');
   assert.equal(clusterDiagramPlayers(fullPairs.players, 18).length, 8, 'Full pairs must show 8 pairs');
+});
+
+// =============================================================================
+// SECTION 10: TASK MOTION-C TESTS
+// =============================================================================
+
+test('MOTION-C: subtle pre-receive receiver movement is bounded within 1-3 logical units and communicates preparation', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  const anim = diag.animation!;
+  assert.ok(anim && anim.steps.length >= 4);
+
+  // Step 1: Pre-receive preparation
+  const step1 = anim.steps[0];
+  assert.equal(step1.id, 'step-1-prep');
+  assert.equal(step1.start, 0);
+  assert.equal(step1.duration, 1.0);
+
+  const moveAction = step1.actions.find((a): a is PlayerMoveAction => a.type === 'playerMove' && a.playerId === 'p2');
+  assert.ok(moveAction && moveAction.type === 'playerMove');
+
+  const p2Initial = diag.players.find((p) => p.id === 'p2')!;
+  const prepDist = Math.hypot(moveAction.to.x - p2Initial.x, moveAction.to.y - p2Initial.y);
+
+  // Verify bounded within 1-3 logical units
+  assert.ok(prepDist >= 1.0, `Pre-receive distance must be at least 1.0 unit (got ${prepDist.toFixed(2)})`);
+  assert.ok(prepDist <= 3.0, `Pre-receive distance must not exceed 3.0 units (got ${prepDist.toFixed(2)})`);
+
+  // Passer p1 remains stable at initial coordinates
+  const p1Move = step1.actions.find((a) => a.type === 'playerMove' && a.playerId === 'p1');
+  assert.equal(p1Move, undefined, 'Passer p1 must remain stable during preparation');
+});
+
+test('MOTION-C: receiver orientation visibly changes before ball arrival (scan -> open body -> receive)', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  const anim = diag.animation!;
+  const moments = anim.coachingMoments!;
+  assert.ok(moments && moments.length >= 2);
+
+  const cm1 = moments.find((m) => m.id === 'coach1')!; // Kiểm tra vai
+  const cm2 = moments.find((m) => m.id === 'coach2')!; // Mở thân người
+
+  assert.equal(cm1.event, 'preReceive');
+  assert.equal(cm1.time, 1.4);
+  assert.equal(cm1.orientation, 75);
+
+  assert.equal(cm2.event, 'receive');
+  assert.equal(cm2.time, 2.4);
+  assert.equal(cm2.orientation, 40);
+
+  // Ball pass step runs from 1.0s to 2.8s (arrival is at 2.8s)
+  const passStep = anim.steps.find((s) => s.id === 'step-2-pass')!;
+  const ballArrivalTime = passStep.start + passStep.duration;
+  assert.equal(ballArrivalTime, 2.8);
+
+  // 1. Initial orientation: facing passer (180°)
+  const orientStart = reconstructPlayerOrientation('p2', 0.5, 180, moments);
+  assert.equal(orientStart, 180);
+
+  // 2. Scan / shoulder check during early flight (1.4s): rotates to 75°
+  const orientScan = reconstructPlayerOrientation('p2', 1.5, 180, moments);
+  assert.equal(orientScan, 75);
+
+  // 3. Open body (2.4s): body orientation changes to 40° BEFORE ball arrival at 2.8s
+  const orientBeforeArrival = reconstructPlayerOrientation('p2', 2.5, 180, moments);
+  assert.equal(orientBeforeArrival, 40, 'Receiver must be in open body orientation BEFORE arrival');
+
+  // 4. At arrival time (2.8s): receiver orientation is ALREADY open (40°), does NOT rotate after arrival
+  const orientAtArrival = reconstructPlayerOrientation('p2', 2.8, 180, moments);
+  assert.equal(orientAtArrival, 40, 'Receiver orientation must remain open at ball arrival without post-arrival rotation');
+});
+
+test('MOTION-C: pass trajectory accurately synchronizes and reaches moving/adjusted receiver without overshoot', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  // At pass departure (t = 1.0s): ball is at passer p1
+  const stateStart = interpolateAnimationState(diag, 1.0);
+  assert.equal(stateStart.balls[0].x, 32);
+  assert.equal(stateStart.balls[0].y, 30);
+
+  // At pass arrival (t = 2.8s): ball reaches exactly receiver p2's adjusted position
+  const stateArrival = interpolateAnimationState(diag, 2.8);
+  const p2Arrival = stateArrival.players.find((p) => p.id === 'p2')!;
+  const ballArrival = stateArrival.balls[0];
+
+  const arrivalDist = Math.hypot(ballArrival.x - p2Arrival.x, ballArrival.y - p2Arrival.y);
+  assert.ok(arrivalDist < 0.1, `Ball must cleanly reach receiver position at arrival (dist=${arrivalDist.toFixed(3)})`);
+  assert.equal(ballArrival.x, 69.5);
+  assert.equal(ballArrival.y, 29);
+});
+
+test('MOTION-C: first touch is controlled and bounded within 3-6 logical coordinate units', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  const anim = diag.animation!;
+  const touchStep = anim.steps.find((s) => s.id === 'step-3-first-touch')!;
+  assert.ok(touchStep);
+  assert.equal(touchStep.start, 2.8);
+  assert.equal(touchStep.duration, 1.2);
+
+  const dribbleAction = touchStep.actions.find((a): a is BallDribbleAction => a.type === 'ballDribble' && a.playerId === 'p2')!;
+  assert.ok(dribbleAction && dribbleAction.type === 'ballDribble');
+
+  // Distance from reception (69.5, 29) to destination
+  const touchDist = Math.hypot(dribbleAction.to.x - 69.5, dribbleAction.to.y - 29);
+  assert.ok(touchDist >= 3.0, `First touch must be >= 3.0 logical units (got ${touchDist.toFixed(2)})`);
+  assert.ok(touchDist <= 6.0, `First touch must be <= 6.0 logical units (got ${touchDist.toFixed(2)})`);
+
+  // Player and ball stay synchronized during first touch
+  const midTouchState = interpolateAnimationState(diag, 3.4);
+  const p2Mid = midTouchState.players.find((p) => p.id === 'p2')!;
+  const b1Mid = midTouchState.balls[0];
+  const touchSyncDist = Math.hypot(b1Mid.x - p2Mid.x, b1Mid.y - p2Mid.y);
+  assert.ok(touchSyncDist < 2.5, `Ball and receiver must remain synchronized during touch (dist=${touchSyncDist.toFixed(2)})`);
+});
+
+test('MOTION-C: coaching moments visually align with action and preserve FIX-A readable durations', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  const moments = diag.animation!.coachingMoments!;
+  assert.equal(moments.length, 3);
+
+  const cm1 = moments[0];
+  const cm2 = moments[1];
+  const cm3 = moments[2];
+
+  assert.equal(cm1.title, 'Kiểm tra vai');
+  assert.equal(cm1.time, 1.4);
+  assert.ok(cm1.time < 2.8, 'Kiểm tra vai must trigger before ball arrival');
+
+  assert.equal(cm2.title, 'Mở thân người');
+  assert.equal(cm2.time, 2.4);
+  assert.ok(cm2.time <= 2.8, 'Mở thân người must trigger just before/at reception');
+
+  assert.equal(cm3.title, 'Chạm bước một');
+  assert.equal(cm3.time, 3.3);
+  assert.ok(cm3.time > 2.8, 'Chạm bước một must trigger immediately after reception');
+
+  // FIX-A duration guarantees
+  assert.ok(getEffectiveCoachingDuration(cm1) >= 3.5);
+  assert.ok(getEffectiveCoachingDuration(cm2) >= 3.5);
+  assert.ok(getEffectiveCoachingDuration(cm3) >= 3.5);
+});
+
+test('MOTION-C: return pass occurs after readable settle gap and animation reaches stable final state without teleport', () => {
+  const diag = buildRepresentativePairDiagram(16, {
+    blockType: 'warm_up',
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' },
+    organization: '16 cầu thủ chia thành 8 nhóm 2',
+    topic: 'Nhận bóng mở thân người',
+  });
+
+  const anim = diag.animation!;
+  const touchStep = anim.steps.find((s) => s.id === 'step-3-first-touch')!;
+  const returnStep = anim.steps.find((s) => s.id === 'step-4-return-pass')!;
+
+  const touchEnd = touchStep.start + touchStep.duration; // 4.0s
+  const returnStart = returnStep.start; // 4.6s
+
+  // Readable action gap between touch and return pass
+  const settleGap = returnStart - touchEnd;
+  assert.ok(settleGap >= 0.4 && settleGap <= 1.0, `Settle gap must be 0.4-1.0s (got ${settleGap.toFixed(2)}s)`);
+
+  // Final state reached cleanly at 6.6s
+  const finalState = interpolateAnimationState(diag, 6.6);
+  const laterState = interpolateAnimationState(diag, 7.0);
+
+  // No teleport back to starting positions
+  assert.equal(finalState.balls[0].x, laterState.balls[0].x);
+  assert.equal(finalState.balls[0].y, laterState.balls[0].y);
+  assert.equal(finalState.players[1].x, laterState.players[1].x);
+  assert.equal(finalState.players[1].y, laterState.players[1].y);
+});
+
+test('MOTION-C TEST CASE: 16 players, Nhận bóng mở thân người, 90 min, 7v7 representative pair choreography full verification', () => {
+  const options = {
+    blockType: 'warm_up' as const,
+    playerCount: 16,
+    playerOrganization: { groups: 8, playersPerGroup: 2, leftover: 0, leftoverRole: 'none' as const },
+    exerciseName: 'Khởi động chuyền bóng mở thân người theo cặp',
+    topic: 'Nhận bóng mở thân người',
+    organization: '16 cầu thủ chia thành 8 nhóm 2 thực hiện đồng thời bài tập chuyền bóng không đối kháng',
+    execution: 'p1 chuyền cho p2, p2 kiểm tra vai, mở thân người nhận bóng bằng chân xa và chuyền trả lại.',
+    equipment: ['16 Quả bóng', '16 Cọc tiêu'],
+    area: '20 x 20 m',
+    gameFormat: '7v7' as const,
+    representationMode: 'representative-group' as const,
+  };
+
+  const diag = buildDefaultStructuredDiagram(options);
+
+  // 1. p1 begins as passer
+  assert.equal(diag.players[0].id, 'p1');
+  assert.equal(diag.players[0].role, 'passer');
+  assert.equal(diag.players[0].x, 32);
+
+  // 2. p2 performs subtle pre-receive preparation (1-3 units)
+  const anim = diag.animation!;
+  const prepMove = anim.steps[0].actions.find((a): a is PlayerMoveAction => a.type === 'playerMove' && a.playerId === 'p2')!;
+  const prepDist = Math.hypot(prepMove.to.x - diag.players[1].x, prepMove.to.y - diag.players[1].y);
+  assert.ok(prepDist >= 1.0 && prepDist <= 3.0);
+
+  // 3. pass travels p1 -> p2 accurately
+  const passAction = anim.steps[1].actions.find((a): a is BallPassAction => a.type === 'ballPass')!;
+  assert.equal(passAction.fromPlayerId, 'p1');
+  assert.equal(passAction.toPlayerId, 'p2');
+
+  // 4. p2 orientation changes before reception
+  const moments = anim.coachingMoments!;
+  const orientBeforeRec = reconstructPlayerOrientation('p2', 2.5, 180, moments);
+  assert.equal(orientBeforeRec, 40);
+
+  // 5. ball reaches moving/current p2 position
+  const stateArrival = interpolateAnimationState(diag, 2.8);
+  const p2Arrival = stateArrival.players.find((p) => p.id === 'p2')!;
+  assert.ok(Math.hypot(stateArrival.balls[0].x - p2Arrival.x, stateArrival.balls[0].y - p2Arrival.y) < 0.1);
+
+  // 6. first touch is short and controlled (3-6 units)
+  const touchAction = anim.steps[2].actions.find((a): a is BallDribbleAction => a.type === 'ballDribble')!;
+  const touchDist = Math.hypot(touchAction.to.x - 69.5, touchAction.to.y - 29);
+  assert.ok(touchDist >= 3.0 && touchDist <= 6.0);
+
+  // 7. coaching moments align to action
+  assert.equal(moments[0].title, 'Kiểm tra vai');
+  assert.ok(moments[0].time < 2.8);
+  assert.equal(moments[1].title, 'Mở thân người');
+  assert.ok(moments[1].time <= 2.8);
+  assert.equal(moments[2].title, 'Chạm bước một');
+  assert.ok(moments[2].time > 2.8);
+
+  // 8. freeze/resume has no snapping
+  const tFreeze = 2.4;
+  const stateBeforeFreeze = interpolateAnimationState(diag, tFreeze);
+  const stateAtResume = interpolateAnimationState(diag, tFreeze);
+  assert.deepEqual(stateBeforeFreeze, stateAtResume);
+
+  // 9. no unnecessary player running: p1 total displacement is 0, p2 total displacement < 7 units
+  const maxP2Dist = Math.hypot(touchAction.to.x - diag.players[1].x, touchAction.to.y - diag.players[1].y);
+  assert.ok(maxP2Dist < 7.0, `Receiver total displacement must be subtle (got ${maxP2Dist.toFixed(2)})`);
+
+  // 10. exported frames match interactive playback
+  const mapping = mapPresentationTimeToTimeline(0.5, anim, diag);
+  assert.equal(mapping.drillTime, 0.5);
+  const svg = renderDiagramFrameToSvgString(diag, mapping, 1200, 720);
+  assert.ok(svg.includes('class="representation-badge-overlay"'));
+  assert.ok(svg.includes('Minh họa 1/8 cặp'));
 });
 
 

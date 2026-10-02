@@ -2528,6 +2528,217 @@ export function validateGroupedDiagram(diagram: StructuredDrillDiagram): Diagram
 }
 
 /**
+ * Builds a clear, football-realistic choreography for representative-pair drills (TASK MOTION-C).
+ * Sequence:
+ * 1. Passer prepares; receiver scans and checks space (subtle 1-3 unit preparation move)
+ * 2. Ball is passed from p1 to p2
+ * 3. Receiver adjusts body orientation before arrival (scan -> open body -> receive)
+ * 4. Receiver receives cleanly on back foot
+ * 5. Controlled first touch moves ball 3-6 units into open space
+ * 6. Settle pause provides readable action gap
+ * 7. Return pass returns cleanly to passer without instant rebound or teleporting
+ * 8. Coaching moments visually aligned:
+ *    - Kiểm tra vai: before pass arrival
+ *    - Mở thân người: just before / at reception
+ *    - Chạm bước một: immediately after reception
+ */
+export function buildRepresentativePairAnimation(
+  diagram: StructuredDrillDiagram,
+  executionContext?: string | string[]
+): DiagramAnimation {
+  const players = Array.isArray(diagram.players) ? diagram.players : [];
+  const primaryBall = (Array.isArray(diagram.balls) && diagram.balls[0]) || { id: 'b1', x: 36, y: 30 };
+  const p1 = players[0] || { id: 'p1', x: 32, y: 30 };
+  const p2 = players[1] || { id: 'p2', x: 68, y: 30 };
+
+  const contextText = [
+    ...(Array.isArray(executionContext) ? executionContext : [executionContext || '']),
+    diagram.representation?.label || '',
+  ].join(' ').toLowerCase();
+
+  const isReceivingOpenBody = /nhận bóng|mở thân|quan sát|kiểm tra vai|half-turn|open body/i.test(contextText);
+
+  // 1. Subtle pre-receive movement for receiver p2 (1–3 logical units)
+  // Shifts slightly forward/side to open angle: dx: +1.5, dy: -1.0 => distance = 1.80 units
+  const preReceiveTarget: DiagramCoordinate = {
+    x: Math.min(95, Math.max(5, Math.round((p2.x + 1.5) * 10) / 10)),
+    y: Math.min(55, Math.max(5, Math.round((p2.y - 1.0) * 10) / 10)),
+  };
+
+  // 2. Controlled first touch destination for p2 (3–6 logical units into open space)
+  // Shifts from preReceiveTarget by dx: +4.0, dy: -2.5 => distance = 4.72 units
+  const firstTouchTarget: DiagramCoordinate = {
+    x: Math.min(95, Math.max(5, Math.round((preReceiveTarget.x + 4.0) * 10) / 10)),
+    y: Math.min(55, Math.max(5, Math.round((preReceiveTarget.y - 2.5) * 10) / 10)),
+  };
+
+  // Step 1: Pre-receive preparation & scanning (0.0s to 1.0s, duration 1.0s)
+  // Passer p1 remains stable; receiver p2 performs subtle adjustment
+  const step1: DiagramAnimationStep = {
+    id: 'step-1-prep',
+    start: 0,
+    duration: 1.0,
+    actions: [
+      {
+        type: 'playerMove',
+        playerId: p2.id,
+        to: preReceiveTarget,
+      },
+    ],
+  };
+
+  // Step 2: Pass p1 -> p2 (1.0s to 2.8s, duration 1.8s)
+  // Travels cleanly from p1 to receiver p2's adjusted position
+  const step2: DiagramAnimationStep = {
+    id: 'step-2-pass',
+    start: 1.0,
+    duration: 1.8,
+    actions: [
+      {
+        type: 'ballPass',
+        ballId: primaryBall.id,
+        fromPlayerId: p1.id,
+        toPlayerId: p2.id,
+      },
+    ],
+  };
+
+  // Step 3: First touch into space (2.8s to 4.0s, duration 1.2s)
+  // Receiver and ball move synchronously 3–6 units into open space
+  const step3: DiagramAnimationStep = {
+    id: 'step-3-first-touch',
+    start: 2.8,
+    duration: 1.2,
+    actions: [
+      {
+        type: 'ballDribble',
+        ballId: primaryBall.id,
+        playerId: p2.id,
+        to: firstTouchTarget,
+      },
+    ],
+  };
+
+  // Step 4: Return pass p2 -> p1 after readable settle gap (4.6s to 6.6s, duration 2.0s)
+  // Small action gap from 4.0s to 4.6s (0.6s) before return pass
+  const step4: DiagramAnimationStep = {
+    id: 'step-4-return-pass',
+    start: 4.6,
+    duration: 2.0,
+    actions: [
+      {
+        type: 'ballPass',
+        ballId: primaryBall.id,
+        fromPlayerId: p2.id,
+        toPlayerId: p1.id,
+      },
+    ],
+  };
+
+  const steps = [step1, step2, step3, step4];
+  const duration = 6.6;
+
+  // Build coaching moments aligned with choreography
+  const coachingMoments: DiagramCoachingMoment[] = [];
+
+  if (isReceivingOpenBody) {
+    // Moment 1: Kiểm tra vai (1.4s) - during ball flight, BEFORE pass arrival at 2.8s
+    coachingMoments.push({
+      id: 'coach1',
+      time: 1.4,
+      duration: 1.0,
+      playerId: p2.id,
+      event: 'preReceive',
+      title: 'Kiểm tra vai',
+      text: 'Quan sát phía sau trước khi nhận để biết hướng chơi tiếp.',
+      orientation: 75, // scanning shoulder angle
+      focus: { zoom: 1.8 },
+      highlight: true,
+    });
+
+    // Moment 2: Mở thân người (2.4s) - just before ball arrival at 2.8s
+    // Orientation adjusts to open angle (40°) BEFORE reception
+    coachingMoments.push({
+      id: 'coach2',
+      time: 2.4,
+      duration: 1.0,
+      playerId: p2.id,
+      event: 'receive',
+      title: 'Mở thân người',
+      text: 'Nhận ở góc mở để nhìn thấy bóng và hướng tấn công cùng lúc.',
+      orientation: 40, // open body angle
+      focus: { zoom: 1.8 },
+      highlight: true,
+    });
+
+    // Moment 3: Chạm bước một (3.3s) - immediately after reception at 2.8s, during first touch
+    coachingMoments.push({
+      id: 'coach3',
+      time: 3.3,
+      duration: 1.0,
+      playerId: p2.id,
+      event: 'firstTouch',
+      title: 'Chạm bước một',
+      text: 'Đưa bóng vào khoảng trống giúp hành động tiếp theo nhanh hơn.',
+      orientation: 35, // oriented toward first touch space
+      focus: { zoom: 1.8 },
+      highlight: true,
+    });
+  } else {
+    // Generic passing pair coaching moment
+    coachingMoments.push({
+      id: 'coach1',
+      time: 1.4,
+      duration: 1.0,
+      playerId: p2.id,
+      event: 'preReceive',
+      title: 'Chuẩn bị đón bóng',
+      text: 'Sẵn sàng tư thế đón bóng chính xác từ đồng đội.',
+      orientation: 45,
+      focus: { zoom: 1.8 },
+      highlight: true,
+    });
+    coachingMoments.push({
+      id: 'coach2',
+      time: 2.4,
+      duration: 1.0,
+      playerId: p2.id,
+      event: 'receive',
+      title: 'Tiếp bóng an toàn',
+      text: 'Khống chế bóng gọn gàng bằng lòng bàn chân.',
+      orientation: 30,
+      focus: { zoom: 1.8 },
+      highlight: true,
+    });
+    coachingMoments.push({
+      id: 'coach3',
+      time: 3.3,
+      duration: 1.0,
+      playerId: p2.id,
+      event: 'firstTouch',
+      title: 'Chuyền trả bóng',
+      text: 'Chuyền bóng chính xác trở lại cho đồng đội.',
+      orientation: 20,
+      focus: { zoom: 1.8 },
+      highlight: true,
+    });
+  }
+
+  const coachingSequence: DiagramCoachingSequence = {
+    id: 'seq-rep-pair',
+    title: isReceivingOpenBody ? 'Nhận bóng mở thân người' : 'Chuỗi huấn luyện kỹ thuật',
+    momentIds: coachingMoments.map((m) => m.id),
+  };
+
+  return {
+    duration,
+    steps,
+    coachingMoments,
+    coachingSequence,
+  };
+}
+
+/**
  * Builds a clear, semantically grounded demonstration animation sequence
  * from the diagram's action paths, players, and balls.
  * Supports simultaneous multi-group / multi-pair animation where every group
@@ -2547,6 +2758,14 @@ export function buildSemanticAnimation(
 
   if (players.length === 0) {
     return { duration: 6, steps: [] };
+  }
+
+  // Representative pair drill choreography (TASK MOTION-C)
+  if (
+    diagram.representation?.mode === 'representative-group' &&
+    players.length === 2
+  ) {
+    return buildRepresentativePairAnimation(diagram, execution);
   }
 
   const steps: DiagramAnimationStep[] = [];
@@ -3308,8 +3527,8 @@ export function buildRepresentativePairDiagram(
 
   // Place the representative pair centrally and clearly
   const players: DiagramPlayer[] = [
-    { id: 'p1', team: 'blue', role: 'passer', x: 32, y: 30 },
-    { id: 'p2', team: 'blue', role: 'receiver', x: 68, y: 30 },
+    { id: 'p1', team: 'blue', role: 'passer', x: 32, y: 30, orientation: 0 },
+    { id: 'p2', team: 'blue', role: 'receiver', x: 68, y: 30, orientation: 180 },
   ];
 
   const balls: DiagramBall[] = [
